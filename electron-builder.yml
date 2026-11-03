@@ -1,0 +1,62 @@
+appId: com.yanyi.adbdepot
+productName: AdbDepot
+copyright: Copyright © 2026 晏奕
+
+directories:
+  output: release/${version}
+  buildResources: build
+
+files:
+  - out/**/*
+  - package.json
+
+extraResources:
+  - from: resources/scrcpy-server
+    to: resources/scrcpy-server
+  # 托盘图标：打包后从 process.resourcesPath/icon.png 读
+  - from: build/icon.png
+    to: icon.png
+
+asar: true
+
+# Without a notarized signature the binary is the only line of defense:
+# don't let it run as plain Node or load code from outside the checked asar.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  # Ad-hoc signature: not notarized, so macOS asks for confirmation on first launch.
+  # To sign with a Developer ID, drop `identity` and set CSC_LINK / CSC_KEY_PASSWORD.
+  identity: "-"
+  hardenedRuntime: false
+
+dmg:
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+
+nsis:
+  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+
+publish: null

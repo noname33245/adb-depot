@@ -1,0 +1,26 @@
+# Secrets
+api_keys.json
+proxies.txt
+
+# Claude Code personal settings
+.claude/settings.local.json
+
+# Node / сборка
+node_modules/
+out/
+dist/
+*.tsbuildinfo
+
+# Скачивается в postinstall (scripts/fetch-server.mjs)
+resources/scrcpy-server
+resources/scrcpy-server.version
+
+# macOS
+.DS_Store
+
+# electron-builder
+release/
+
+# 打包产物
+release/
+*.log
