@@ -11,12 +11,9 @@ import { SettingsModal } from "./components/SettingsModal";
 import { useSettings, useT } from "./settings";
 import { UpdateBadge } from "./components/UpdateBadge";
 import { AppsPanel, DevicePanel, FilesPanel } from "./components/ToolsPanels";
-import { GalleryPanel } from "./components/GalleryPanel";
-import { MonitorPanel } from "./components/MonitorPanel";
 import { ConnectionCenter } from "./components/ConnectionCenter";
-import { ThemeMenu } from "./components/ThemeMenu";
 
-type Tab = "actions" | "apps" | "gallery" | "files" | "device" | "monitor" | "scenarios" | "proxy";
+type Tab = "actions" | "apps" | "files" | "device" | "scenarios" | "proxy";
 
 const TILE_WIDTH_KEY = "evelin.tileWidth";
 const TILE_SIZES_KEY = "adb.tileSizes";
@@ -64,15 +61,11 @@ function savedTileSizes(): Record<string, number> {
 
 export function App() {
   const t = useT();
-  const { settings, update } = useSettings();
+  const { settings } = useSettings();
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [focused, setFocused] = useState<string | undefined>();
   const [broadcast, setBroadcast] = useState(false);
-  /** 链路专供文件时视频流是停的，磁贴只显示占位。 */
-  const [videoOff, setVideoOff] = useState(settings.linkMode === "files");
-  /** 加一就重建全部磁贴：切链路要按新参数重新建流。 */
-  const [linkEpoch, setLinkEpoch] = useState(0);
   const [tileWidth, setTileWidth] = useState(savedTileWidth);
   const [tileSizes, setTileSizes] = useState<Record<string, number>>(savedTileSizes);
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
@@ -85,10 +78,6 @@ export function App() {
   const preFocusWidth = useRef<Record<string, number>>({});
   const [tab, setTab] = useState<Tab>("actions");
   const [log, setLog] = useState<LogEntry[]>([]);
-  const [logHeight, setLogHeight] = useState(() => {
-    const v = Number(localStorage.getItem("adbdepot.logHeight"));
-    return Number.isFinite(v) && v >= 90 ? Math.min(620, v) : 200;
-  });
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [runs, setRuns] = useState<RunStatus[]>([]);
   const [recording, setRecording] = useState<RecordingStatus | null>(null);
@@ -276,54 +265,6 @@ export function App() {
           </span>
         </div>
         <div className="topbar-controls">
-          {/* 链路用途：一键把带宽让给投屏或文件 */}
-          <label className="xfer" title="专用视频：720p/4Mbps 高清投屏，文件传输被压到 512KB/s；专用文件：停掉视频流，链路全部给文件">
-            <span>链路</span>
-            <select
-              value={settings.linkMode}
-              onChange={async (e) => {
-                const mode = e.target.value as "video" | "files";
-                // 必须先走 update()：界面上的值来自渲染层的设置副本，
-                // 只通知主进程的话下拉会一直弹回旧值，看着像「点了没用」。
-                await update({ linkMode: mode });
-                await window.farm.link.set(mode);
-                setVideoOff(mode === "files");
-                setLinkEpoch((n) => n + 1);
-              }}
-            >
-              <option value="video">视频优先</option>
-              <option value="files">文件优先</option>
-            </select>
-          </label>
-
-          {/* 传输参数：并发路数 + 速率上限，放在全选左边，改了立刻生效 */}
-          <label className="xfer" title="相册缩略图 / 应用图标同时取几路。越大越快，但会和投屏抢带宽">
-            <span>并发</span>
-            <select
-              value={settings.transferSlots}
-              onChange={(e) => void update({ transferSlots: Number(e.target.value) })}
-            >
-              {[2, 4, 6, 8, 10, 12].map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="xfer" title="传输速率上限。不限 = 跑满链路；限速可让投屏不掉帧">
-            <span>限速</span>
-            <select
-              value={settings.transferLimitKbps}
-              onChange={(e) => void update({ transferLimitKbps: Number(e.target.value) })}
-            >
-              <option value={0}>不限</option>
-              <option value={512}>512 KB/s</option>
-              <option value={1024}>1 MB/s</option>
-              <option value={2048}>2 MB/s</option>
-              <option value={4096}>4 MB/s</option>
-              <option value={8192}>8 MB/s</option>
-            </select>
-          </label>
           <button className="btn" onClick={() => setSelected(new Set(online.map((d) => d.serial)))}>
             {t("top.selectAll")}
           </button>
@@ -349,7 +290,6 @@ export function App() {
               }}
             />
           </label>
-          <ThemeMenu />
           <button className="icon-btn settings-btn" title={t("top.settings")} onClick={() => setSettingsOpen(true)}>
             ⚙
           </button>
@@ -376,8 +316,7 @@ export function App() {
                 focused={focused === d.serial}
                 recording={recording?.serial === d.serial}
                 run={runs.find((r) => r.serial === d.serial && r.state === "running")}
-                streamKey={`${streamKey}#${linkEpoch}`}
-                paused={videoOff}
+                streamKey={streamKey}
                 width={widthOf(d.serial)}
                 targets={() => targetsFor(d.serial)}
                 position={positions[d.serial] ?? { x: index * 36, y: index * 36 }}
@@ -407,17 +346,11 @@ export function App() {
           <button className={tab === "apps" ? "active" : ""} onClick={() => setTab("apps")}>
             应用
           </button>
-          <button className={tab === "gallery" ? "active" : ""} onClick={() => setTab("gallery")}>
-            相册
-          </button>
           <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>
             文件
           </button>
           <button className={tab === "device" ? "active" : ""} onClick={() => setTab("device")}>
             设备
-          </button>
-          <button className={tab === "monitor" ? "active" : ""} onClick={() => setTab("monitor")}>
-            监控
           </button>
           <button className={tab === "scenarios" ? "active" : ""} onClick={() => setTab("scenarios")}>
             {t("tab.scenarios")}
@@ -433,11 +366,8 @@ export function App() {
         <div className="sidebar-body">
           {tab === "actions" && <ActionsPanel targets={actionTargets} run={run} />}
           {tab === "apps" && <AppsPanel serial={activeSerial} />}
-          {/* 相册按需挂载：切到这个标签才会去拉列表和缩略图 */}
-          {tab === "gallery" && <GalleryPanel serial={activeSerial} />}
           {tab === "files" && <FilesPanel serial={activeSerial} />}
           {tab === "device" && <DevicePanel serial={activeSerial} deviceIp={activeIp} onOpenConnection={() => setConnOpen(true)} />}
-          {tab === "monitor" && <MonitorPanel serial={activeSerial} devices={devices} />}
           {tab === "scenarios" && (
             <ScenariosPanel
               devices={devices}
@@ -452,15 +382,7 @@ export function App() {
           )}
           {tab === "proxy" && <ProxyPanel targets={actionTargets} run={run} onOpenSettings={() => setSettingsOpen(true)} />}
         </div>
-        <LogPanel
-          entries={log}
-          onClear={() => setLog([])}
-          height={logHeight}
-          onHeight={(h) => {
-            setLogHeight(h);
-            localStorage.setItem("adbdepot.logHeight", String(h));
-          }}
-        />
+        <LogPanel entries={log} onClear={() => setLog([])} />
       </aside>
 
       {editing && <ScenarioEditor key={editing.id} scenario={editing} scenarios={scenarios} onSaved={setScenarios} onClose={() => setEditing(undefined)} />}

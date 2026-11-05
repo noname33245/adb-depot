@@ -20,49 +20,6 @@ export interface DeviceResult {
   error?: string;
 }
 
-export interface GeoFix {
-  provider: string;
-  lat: number;
-  lon: number;
-  /** 水平精度，米。 */
-  accuracy?: number;
-  /** 距现在多久（设备给的原始串，如 +1h2m3s）。 */
-  elapsed?: string;
-  /** 距今多少秒（用设备 uptime 减出来的，更直观）。 */
-  ageSeconds?: number;
-}
-
-export interface LocationInfo {
-  enabled: boolean;
-  mode: number;
-  fix: GeoFix | null;
-}
-
-export interface ContactEntry {
-  name: string;
-  number: string;
-  /** 号码类型（手机 / 住宅 / 工作…），拿不到就是空串。 */
-  type: string;
-}
-
-export interface PhotoPage {
-  items: PhotoEntry[];
-  /** 设备上一共多少张，用来显示进度和判断还有没有下一页。 */
-  total: number;
-}
-
-export interface PhotoEntry {
-  /** 设备上的完整路径。 */
-  path: string;
-  name: string;
-  /** 毫秒时间戳。 */
-  time: number;
-  /** 原图字节数（拿不到就是 undefined）。 */
-  size?: number;
-  /** 所在目录（去掉 /sdcard/ 前缀），用来做分组提示。 */
-  dir: string;
-}
-
 export interface Proxy {
   type: string;
   host: string;
@@ -183,19 +140,8 @@ export interface StreamSettings {
   stayAwake: boolean;
 }
 
-/** 界面主题：固定深色 / 固定浅色 / 跟随 Windows 深色模式。 */
-export type ThemeMode = "dark" | "light" | "system";
-
-export interface ThemeState {
-  mode: ThemeMode;
-  /** Windows 当前是否处于深色模式（只在 mode=system 时决定界面）。 */
-  systemDark: boolean;
-}
-
 export interface AppSettings {
   language: Lang;
-  /** 界面主题，默认深色（保持老版本外观）。 */
-  theme: ThemeMode;
   /** False until the user picks a language on first run. */
   languageChosen: boolean;
   /** Ask before reboot and delete. */
@@ -214,14 +160,9 @@ export interface AppSettings {
   /** 开机自动启动。 */
   autoLaunch: boolean;
   /** 启动后不弹窗口，直接驻留托盘。 */
+  startMinimized: boolean;
   /** 启动时自动清理过期缓存。 */
   cacheAutoClean: boolean;
-  /** 相册 / 图标同时并发几路取图（1–12）。 */
-  transferSlots: number;
-  /** 传输限速，单位 KB/s；0 表示不限。 */
-  transferLimitKbps: number;
-  /** 链路用途：视频优先 / 文件优先（后者会停掉视频流）。 */
-  linkMode: "video" | "files";
   /** 缓存保留天数（1–365），超过这个天数的缓存文件会被删掉。 */
   cacheDays: number;
   /** 电脑与手机剪贴板自动互相同步。 */
@@ -271,11 +212,6 @@ export interface FarmApi {
     info(): Promise<AppInfo>;
     openDataDir(): Promise<void>;
   };
-  theme: {
-    state(): Promise<ThemeState>;
-    /** 系统深浅色变化（或用户在别处改了主题）时推送。 */
-    onChange(listener: (state: ThemeState) => void): () => void;
-  };
   cache: {
     /** 当前缓存占用。 */
     stat(): Promise<CacheStat>;
@@ -287,20 +223,12 @@ export interface FarmApi {
     refresh(serial: string): Promise<DeviceInfo | undefined>;
     onChange(listener: (devices: DeviceInfo[]) => void): () => void;
   };
-  link: {
-    /** 切换链路用途，会立刻停/起投屏会话。 */
-    set(mode: "video" | "files"): Promise<void>;
-  };
   mirror: {
     start(serial: string): Promise<MirrorStarted>;
     stop(serial: string): Promise<void>;
-    /** 暂停/恢复投屏通道时保持轻量通路（保活，不会让设备掉线）。 */
-    setPaused(serials: string[], paused: boolean): Promise<void>;
     onPacket(listener: (serial: string, packet: VideoPacket) => void): () => void;
     onSize(listener: (serial: string, width: number, height: number) => void): () => void;
     onStopped(listener: (serial: string, reason: string) => void): () => void;
-    /** 每 2 秒一次的实时帧率与码率。 */
-    onStats(listener: (serial: string, stats: { fps: number; kbps: number }) => void): () => void;
   };
   control: {
     touch(serials: string[], event: TouchEvent): void;
@@ -319,45 +247,7 @@ export interface FarmApi {
     reboot(serials: string[]): Promise<DeviceResult[]>;
     wake(serials: string[]): Promise<DeviceResult[]>;
   };
-  contacts: {
-    /** 读取整本通讯录（只读，不改动手机数据）。 */
-    list(serial: string): Promise<ContactEntry[]>;
-  };
-  clipboard: {
-    /** 写系统剪贴板（渲染层的 clipboard API 被权限策略挡住，走主进程）。 */
-    write(text: string): Promise<void>;
-  };
-  gps: {
-    /** 读手机最近一次定位（系统缓存，可能为空）。 */
-    get(serial: string): Promise<LocationInfo>;
-  };
-  gallery: {
-    /** 分页列出照片（只读元数据，不下载图片）。refresh 为 true 时丢弃缓存重新扫。 */
-    list(
-      serial: string,
-      offset?: number,
-      limit?: number,
-      refresh?: boolean,
-      opts?: { dir?: string; q?: string },
-    ): Promise<PhotoPage>;
-    /** 按目录分组（相册下拉用）。 */
-    dirs(serial: string): Promise<{ dir: string; count: number }[]>;
-    /** 把选中的原图下载到本地目录（弹目录选择框）。 */
-    download(serial: string, paths: string[]): Promise<{ dir: string; saved: number; failed: number }>;
-    /** 丢弃这台设备排队中的缩略图请求（翻页时用）。 */
-    cancel(serial: string): Promise<void>;
-    /** 批量缩略图：一条命令取多张，返回拿到的那部分。 */
-    thumbs(serial: string, paths: string[]): Promise<{ path: string; data: Uint8Array }[]>;
-    /** 单张缩略图（缓存未命中时兜底，会读原图）。 */
-    thumb(serial: string, path: string, full?: boolean): Promise<Uint8Array>;
-    /** 大图预览，返回 dataURL。 */
-    preview(serial: string, path: string): Promise<Uint8Array>;
-  };
   apps: {
-    /** 应用图标（dataURL），按需取，不下载 APK。 */
-    icon(serial: string, pkg: string): Promise<string>;
-    /** 把应用 APK 拉到电脑，弹目录选择框。 */
-    extract(serial: string, pkg: string, label?: string): Promise<{ ok: boolean; dir?: string; error?: string }>;
     list(serial: string): Promise<AppEntry[]>;
     detail(serial: string, pkg: string): Promise<{ versionName?: string; versionCode?: string; enabled: boolean }>;
     uninstall(serial: string, pkg: string): Promise<string>;
@@ -376,21 +266,13 @@ export interface FarmApi {
     /** 选本地文件，推到设备当前目录。 */
     push(serial: string, remoteDir: string): Promise<string | undefined>;
     remove(serial: string, target: string): Promise<string>;
-    /** 重命名或移动到新路径。 */
-    rename(serial: string, from: string, to: string): Promise<string>;
-    /** 复制到新路径。 */
-    copy(serial: string, from: string, to: string): Promise<string>;
     makeDir(serial: string, target: string): Promise<string>;
     scanMedia(serial: string, target: string): Promise<string>;
   };
   wireless: {
     /** 本机所有 IPv4 网卡与网段，用于选扫描范围。 */
     networks(): Promise<NetworkInfo[]>;
-    /** 电脑移动热点的 SSID / 网段，跨 VLAN 连不上时给引导用。 */
-    hotspot(): Promise<HotspotInfo>;
     mdns(): Promise<WirelessTarget[]>;
-    /** 发现 IPv6 链路本地可达的 adbd（跨 VLAN 时的直连通道）。 */
-    ipv6(ports: number[]): Promise<WirelessTarget[]>;
     scan(req: ScanRequest): Promise<WirelessTarget[]>;
     cancelScan(): Promise<void>;
     onProgress(listener: (p: ScanProgress) => void): () => void;
@@ -416,36 +298,6 @@ export interface FarmApi {
   system: {
     props(serial: string): Promise<DeviceProps>;
     stats(serial: string): Promise<DeviceStats>;
-    /** 控制通路的往返延迟（ms），用来判断卡顿在链路还是解码。 */
-    ping(serial: string): Promise<number>;
-  };
-  /** 相册 / 文件的后台下载队列。 */
-  downloads: {
-    /** 弹目录选择框后入队，立即返回加入的条数，不阻塞界面。 */
-    enqueue(serial: string, paths: string[]): Promise<{ dir: string; added: number }>;
-    list(): Promise<DownloadTask[]>;
-    /** 不传 id 就取消全部未开始的任务。 */
-    cancel(id?: string): Promise<void>;
-    clear(): Promise<void>;
-    onChange(listener: (tasks: DownloadTask[]) => void): () => void;
-  };
-  /** 手机通知同步（dumpsys 轮询，无需手机端授权）。 */
-  notifications: {
-    /** popup=false 时只在列表里显示，不弹系统通知。 */
-    start(serial: string, popup?: boolean): Promise<void>;
-    stop(): Promise<void>;
-    list(): Promise<PhoneNotification[]>;
-    clear(): Promise<void>;
-    serial(): Promise<string | undefined>;
-    onChange(listener: (items: PhoneNotification[]) => void): () => void;
-  };
-  /** 屏幕录制：渲染层逐秒把视频分片交给主进程追加写盘。 */
-  screenrec: {
-    create(serial: string, ext: string): Promise<{ id: string; path: string } | undefined>;
-    append(id: string, bytes: Uint8Array): Promise<void>;
-    finish(id: string): Promise<string>;
-    abort(id: string): Promise<void>;
-    reveal(path: string): Promise<void>;
   };
   proxy: {
     state(): Promise<ProxyState>;
@@ -550,8 +402,6 @@ export interface WirelessTarget {
   /** 协议指纹：明文 adbd / TLS 无线调试 / adb 服务端 / 认不出的假响应；
    *  `host` 表示「这台机器在线，但没有任何 ADB 端口开着」（adbd 退回了 USB 模式）。 */
   protocol?: "adbd" | "tls" | "adb-server" | "unknown" | "closed" | "host";
-  /** IPv6 链路本地直连条目：`ip` 形如 `[fe80::…%8]`，能绕过 VLAN 隔离。 */
-  via6?: boolean;
 }
 
 export interface NetworkInfo {
@@ -564,22 +414,12 @@ export interface NetworkInfo {
   virtual: boolean;
 }
 
-/** Windows 移动热点信息：跨 VLAN 被隔离时，引导手机切到同一二层网络。 */
-export interface HotspotInfo {
-  ssid?: string;
-  on: boolean;
-  cidr?: string;
-  address?: string;
-}
-
 export interface ScanRequest {
   /** 要扫的网段，`a.b.c.0/24` 形式。 */
   cidrs: string[];
   ports: number[];
   timeoutMs?: number;
   concurrency?: number;
-  /** 扫完本网段后继续扩扫同一 /16 的相邻网段，默认开。 */
-  expandNearby?: boolean;
 }
 
 export interface ScanProgress {
@@ -589,8 +429,6 @@ export interface ScanProgress {
   running: boolean;
   /** 本次新命中的地址，让界面边扫边出，不用等整轮结束。 */
   targets?: WirelessTarget[];
-  /** `nearby` 时 total 会变大、进度条回退，界面要说明原因。 */
-  phase?: "primary" | "nearby";
 }
 
 export interface ConnectResult {
@@ -629,26 +467,4 @@ export interface ConnHistoryItem {
   label?: string;
   lastSeen: number;
   count: number;
-}
-
-/** 下载队列里的一项。dir 是本次选的保存目录。 */
-export interface DownloadTask {
-  id: string;
-  serial: string;
-  path: string;
-  name: string;
-  dir: string;
-  state: "queued" | "running" | "done" | "failed" | "cancelled";
-  error?: string;
-  saved?: string;
-}
-
-/** 从手机通知栏读出来的一条通知（只读，不改动手机）。 */
-export interface PhoneNotification {
-  id: string;
-  serial: string;
-  pkg: string;
-  title: string;
-  text: string;
-  at: number;
 }

@@ -13,8 +13,6 @@ interface Props {
   run?: RunStatus;
   /** Changes with stream settings, which restarts the stream. */
   streamKey: string;
-  /** 投屏通道被暂停时，磁贴不建流、只显示占位。 */
-  paused?: boolean;
   /** 磁贴宽度（px），由拖动边框调整。 */
   width: number;
   /** Input targets for this tile, depending on broadcast mode. */
@@ -31,31 +29,18 @@ type Status = { kind: "connecting" } | { kind: "live" } | { kind: "error"; messa
 const MIN_W = 160;
 const MAX_W = 900;
 
-export function DeviceTile({ device, selected, focused, recording, run, streamKey, paused, width, targets, position, onMove, onResize, onToggleSelect, onToggleFocus }: Props) {
+export function DeviceTile({ device, selected, focused, recording, run, streamKey, width, targets, position, onMove, onResize, onToggleSelect, onToggleFocus }: Props) {
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<Status>({ kind: "connecting" });
   const [attempt, setAttempt] = useState(0);
-  /** 实时帧率 / 码率，由主进程每 2 秒推一次。 */
-  const [perf, setPerf] = useState<{ fps: number; kbps: number }>();
   const pointerDown = useRef(false);
   // 先按常见比例占位，拿到真实分辨率后立刻纠正，避免开头闪一下黑边。
   const [aspect, setAspect] = useState(9 / 19.5);
   const online = device.state === "device";
 
   useEffect(() => {
-    return window.farm.mirror.onStats((serial, stats) => {
-      if (serial === device.serial) setPerf(stats);
-    });
-  }, [device.serial]);
-
-  useEffect(() => {
     const canvas = canvasRef.current;
-    // 链路专供文件：视频会话已停，这里不建流，只显示占位
-    if (paused) {
-      setStatus({ kind: "connecting" });
-      return;
-    }
     if (!online || !canvas) return;
 
     let cancelled = false;
@@ -191,11 +176,6 @@ export function DeviceTile({ device, selected, focused, recording, run, streamKe
             {device.battery !== undefined && ` · ${device.battery}%`}
           </span>
         </div>
-        {perf && status.kind === "live" && (
-          <span className="badge badge-perf" title="实时帧率 / 码率">
-            {perf.fps}fps · {perf.kbps >= 1000 ? `${(perf.kbps / 1000).toFixed(1)}M` : `${perf.kbps}K`}
-          </span>
-        )}
         {recording && (
           <span className="badge badge-rec" title={t("tile.recording")}>
             ● rec
@@ -220,7 +200,6 @@ export function DeviceTile({ device, selected, focused, recording, run, streamKe
         {online ? (
           <canvas
             ref={canvasRef}
-            data-serial={device.serial}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}

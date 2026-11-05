@@ -91,6 +91,37 @@ export function ActionsPanel({ targets, run }: Props) {
         <button className="btn wide" disabled={disabled} onClick={() => exec("install", t("actions.installTitle"), window.farm.batch.installApk)}>
           {busy === "install" ? t("actions.installing") : t("actions.install")}
         </button>
+        <p className="hint">{t("actions.privacyHint")}</p>
+      </section>
+
+      <section>
+        <h3>{t("actions.text")}</h3>
+        <form
+          className="row"
+          onSubmit={submit(() => {
+            if (!text) return;
+            window.farm.control.text(targets, text);
+            setText("");
+          })}
+        >
+          <input className="input" placeholder={t("actions.textPlaceholder")} value={text} onChange={(e) => setText(e.target.value)} />
+          <button className="btn" disabled={targets.length === 0 || !text}>
+            {t("actions.type")}
+          </button>
+        </form>
+      </section>
+
+      <section>
+        <h3>{t("actions.apps")}</h3>
+        <form className="row" onSubmit={submit(() => pkg && void exec("launch", t("actions.launchTitle", { pkg }), (s) => window.farm.batch.launchApp(s, pkg)))}>
+          <input className="input" placeholder="com.example.app" value={pkg} onChange={(e) => setPkg(e.target.value.trim())} />
+          <button className="btn" disabled={disabled || !pkg}>
+            {busy === "launch" ? "…" : t("actions.launch")}
+          </button>
+        </form>
+        <button className="btn wide" disabled={disabled} onClick={() => exec("install", t("actions.installTitle"), window.farm.batch.installApk)}>
+          {busy === "install" ? t("actions.installing") : t("actions.install")}
+        </button>
       </section>
 
       <section>

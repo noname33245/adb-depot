@@ -52,22 +52,6 @@ export interface MirrorSink {
 
 export class MirrorManager {
   #sessions = new Map<string, Promise<Session>>();
-
-  /**
-   * 低带宽模式的设备。
-   *
-   * 暂停投屏时不掐断会话 —— 掐断会让无线 adb 的路被系统回收，恢复就再也连不上。
-   * 改成把码率压到 8kbps、画面 96px、1fps：通道还在（互相有心跳），
-   * 人也看不到手机上的内容，代价只有 1KB/s 左右。
-   */
-  /**
-   * 暂停中的设备。
-   *
-   * 绝不掐会话 —— 实测只要 stop 一次，MIUI 就会把无线调试整个关掉，再也连不回来。
-   * 改成给手机发「关显示电源」：屏幕全黑，编码器没有变化内容可编，
-   * 码率自然掉到几 KB/s，而 adb 通路和 scrcpy 会话都还活着。
-   */
-  #paused = new Set<string>();
   #pushed = new Map<string, Promise<void>>();
   #server: Promise<Uint8Array>;
 
@@ -95,8 +79,7 @@ export class MirrorManager {
   }
 
   async start(serial: string): Promise<{ width: number; height: number }> {
-    // 必须重启：界面每次都会新建解码器，而解码器需要 SPS/PPS 才能解出画面。
-    // 复用一个已在跑的会话，新解码器收不到配置帧，画面就会定住不动。
+    // Restart so a freshly created decoder receives the codec configuration again.
     if (this.#sessions.has(serial)) await this.stop(serial);
 
     const pending = this.#open(serial);
@@ -132,7 +115,6 @@ export class MirrorManager {
     await pushed;
 
     const quality = this.stream();
-    console.log(`[mirror ${serial}] 建流 ${quality.maxSize}p ${quality.bitRate}Mbps ${quality.maxFps}fps`);
     const options = new AdbScrcpyOptions3_3_3({
       audio: false,
       control: true,
@@ -256,22 +238,6 @@ export class MirrorManager {
       this.#sessions.delete(serial);
       this.sink.stopped(serial, reason);
     }
-  }
-
-  /**
-   * 暂停 / 恢复投屏。
-   *
-   * 只记标记，**不碰手机、也不停会话**：
-   * 停会话会让 MIUI 关掉无线调试（实测再也连不回来），
-   * 改手机显示电源又会动到手机屏幕。两者都不做，只让界面停止渲染。
-   */
-  setPaused(serial: string, on: boolean): void {
-    if (on) this.#paused.add(serial);
-    else this.#paused.delete(serial);
-  }
-
-  isPaused(serial: string): boolean {
-    return this.#paused.has(serial);
   }
 
   async stop(serial: string): Promise<void> {
