@@ -23,6 +23,7 @@ export function defaultSettings(language: Lang): AppSettings {
     startMinimized: false,
     cacheAutoClean: true,
     cacheDays: 7,
+    syncClipboard: true,
   };
 }
 
@@ -94,6 +95,7 @@ export function mergeSettings(base: AppSettings, patch: unknown): AppSettings {
   if (p.startMinimized !== undefined) next.startMinimized = bool(p.startMinimized, "startMinimized");
   if (p.cacheAutoClean !== undefined) next.cacheAutoClean = bool(p.cacheAutoClean, "cacheAutoClean");
   if (p.cacheDays !== undefined) next.cacheDays = Math.round(range(p.cacheDays, 0, 365, "cacheDays"));
+  if (p.syncClipboard !== undefined) next.syncClipboard = bool(p.syncClipboard, "syncClipboard");
   return next;
 }
 

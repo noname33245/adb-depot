@@ -75,6 +75,7 @@ const mirror = new MirrorManager(
     stopped: (serial, reason) => win?.webContents.send("mirror:stopped", serial, reason),
   },
   () => settings.get().stream,
+  () => settings.get().syncClipboard,
 );
 
 function proxyChanged(): ProxyState {
@@ -363,7 +364,11 @@ function on<A extends unknown[]>(channel: string, fn: (...args: A) => unknown): 
   ipcMain.on(channel, (e, ...args) => {
     if (!isTrustedSender(e)) return;
     try {
-      void fn(...(args as A));
+      const result = fn(...(args as A));
+      // 异步失败以前会被 try/catch 漏掉，变成静默无反应（文字输入就是这样）
+      if (result && typeof (result as Promise<unknown>).then === "function") {
+        (result as Promise<unknown>).catch((err: unknown) => console.warn(`[ipc] ${channel}:`, err));
+      }
     } catch (err) {
       console.warn(`[ipc] ${channel}:`, err);
     }
@@ -427,6 +432,7 @@ function registerIpc(): void {
   );
   handle("apps:clearData", (s: unknown, pkg: unknown) => tools.clearData(serial(s), String(pkg)));
   handle("apps:forceStop", (s: unknown, pkg: unknown) => tools.forceStop(serial(s), String(pkg)));
+  handle("apps:launch", (s: unknown, pkg: unknown) => tools.launchApp(serial(s), String(pkg)));
   handle("apps:installFile", async (s: unknown) => {
     if (!win) return undefined;
     const pick = await dialog.showOpenDialog(win, {
@@ -540,6 +546,10 @@ function registerIpc(): void {
     recorder.captureKey(targets, key as NavKey);
     return mirror.key(targets, key as NavKey);
   });
+  // 单向操作：只负责把手机屏幕关掉，返回结果好让界面显示
+  handle("control:privacy", () => mirror.setScreenOff());
+  handle("control:privacyOff", (list: unknown) => mirror.setScreenOn(serials(list)));
+
   on("control:text", (list: unknown, text: unknown) => {
     if (typeof text !== "string" || text.length === 0 || text.length > 1000) return;
     const targets = serials(list);
@@ -557,10 +567,7 @@ function registerIpc(): void {
     if (typeof pkg !== "string" || !PACKAGE_RE.test(pkg)) throw new Error(t("err.badPackage"));
     const targets = serials(list);
     recorder.captureStep(targets, { type: "launchApp", package: pkg });
-    return devices.forEach(targets, async (s) => {
-      const out = await devices.shell(s, shellCommand("monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"));
-      if (/No activities found|monkey aborted/i.test(out)) throw new Error(t("err.packageNotFound", { pkg }));
-    });
+    return devices.forEach(targets, (s) => tools.launchApp(s, pkg));
   });
 
   handle("batch:installApk", async (list: unknown) => {

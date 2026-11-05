@@ -17,6 +17,8 @@ interface Props {
   width: number;
   /** Input targets for this tile, depending on broadcast mode. */
   targets: () => string[];
+  position: { x: number; y: number };
+  onMove: (position: { x: number; y: number }) => void;
   onResize: (width: number) => void;
   onToggleSelect: () => void;
   onToggleFocus: () => void;
@@ -27,7 +29,7 @@ type Status = { kind: "connecting" } | { kind: "live" } | { kind: "error"; messa
 const MIN_W = 160;
 const MAX_W = 900;
 
-export function DeviceTile({ device, selected, focused, recording, run, streamKey, width, targets, onResize, onToggleSelect, onToggleFocus }: Props) {
+export function DeviceTile({ device, selected, focused, recording, run, streamKey, width, targets, position, onMove, onResize, onToggleSelect, onToggleFocus }: Props) {
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<Status>({ kind: "connecting" });
@@ -143,6 +145,19 @@ export function DeviceTile({ device, selected, focused, recording, run, streamKe
     window.addEventListener("pointercancel", up);
   }
 
+  const moveStart = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
+  function startMove(e: PointerEvent<HTMLElement>) {
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button, input, label")) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    moveStart.current = { x: e.clientX, y: e.clientY, left: position.x, top: position.y };
+  }
+  function moveWindow(e: PointerEvent<HTMLElement>) {
+    const start = moveStart.current;
+    if (!start) return;
+    onMove({ x: Math.max(0, start.left + e.clientX - start.x), y: Math.max(0, start.top + e.clientY - start.y) });
+  }
+
   const title = [device.brand, device.model].filter(Boolean).join(" ") || device.serial;
 
   return (
@@ -150,7 +165,7 @@ export function DeviceTile({ device, selected, focused, recording, run, streamKe
       className={`tile${selected ? " selected" : ""}${focused ? " focused" : ""}${recording ? " recording" : ""}`}
       style={{ width }}
     >
-      <header className="tile-header">
+      <header className="tile-header" title="拖动标题栏移动手机窗口" onPointerDown={startMove} onPointerMove={moveWindow} onPointerUp={() => { moveStart.current = null; }} onPointerCancel={() => { moveStart.current = null; }} onLostPointerCapture={() => { moveStart.current = null; }}>
         <label className="tile-check" title={t("tile.select")}>
           <input type="checkbox" checked={selected} onChange={onToggleSelect} />
         </label>

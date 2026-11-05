@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import type { DeviceInfo, DeviceResult, RecordingStatus, RunStatus, Scenario } from "@shared/types";
 import { DeviceTile } from "./components/DeviceTile";
 import { ActionsPanel } from "./components/ActionsPanel";
@@ -19,6 +20,20 @@ const TILE_SIZES_KEY = "adb.tileSizes";
 /** 磁贴宽度范围：拖动和顶栏滑块共用同一套边界。 */
 const TILE_MIN_W = 160;
 const TILE_MAX_W = 640;
+
+/** 右侧操作栏宽度，拖动分隔条调整。 */
+const SIDE_WIDTH_KEY = "adb.sideWidth";
+const SIDE_MIN_W = 300;
+const SIDE_MAX_W = 900;
+
+function savedSideWidth(): number {
+  try {
+    const n = Number(localStorage.getItem(SIDE_WIDTH_KEY));
+    return n >= SIDE_MIN_W && n <= SIDE_MAX_W ? n : 340;
+  } catch {
+    return 340;
+  }
+}
 
 function savedTileWidth(): number {
   try {
@@ -53,6 +68,13 @@ export function App() {
   const [broadcast, setBroadcast] = useState(false);
   const [tileWidth, setTileWidth] = useState(savedTileWidth);
   const [tileSizes, setTileSizes] = useState<Record<string, number>>(savedTileSizes);
+  const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [stack, setStack] = useState<string[]>([]);
+  const desktopRef = useRef<HTMLDivElement>(null);
+  const [desktopHeight, setDesktopHeight] = useState(600);
+  const raiseTile = (serial: string) => setStack((prev) => [...prev.filter((s) => s !== serial), serial]);
+  const [sideWidth, setSideWidth] = useState(savedSideWidth);
+  const sideDrag = useRef<{ x: number; w: number } | null>(null);
   const preFocusWidth = useRef<Record<string, number>>({});
   const [tab, setTab] = useState<Tab>("actions");
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -80,6 +102,35 @@ export function App() {
       // 同上
     }
   }, [tileSizes]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDE_WIDTH_KEY, String(sideWidth));
+    } catch {
+      // 同上
+    }
+  }, [sideWidth]);
+
+  /** 拖右侧分隔条调整操作栏宽度；右侧最多留 420px 给投屏区。 */
+  const startSideDrag = (e: ReactPointerEvent): void => {
+    e.preventDefault();
+    sideDrag.current = { x: e.clientX, w: sideWidth };
+    document.body.classList.add("side-resizing");
+    const move = (ev: PointerEvent): void => {
+      const d = sideDrag.current;
+      if (!d) return;
+      const max = Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, window.innerWidth - 420));
+      setSideWidth(Math.round(Math.min(max, Math.max(SIDE_MIN_W, d.w - (ev.clientX - d.x)))));
+    };
+    const up = (): void => {
+      sideDrag.current = null;
+      document.body.classList.remove("side-resizing");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
 
   const widthOf = useCallback(
     (serial: string): number => tileSizes[serial] ?? tileWidth,
@@ -123,6 +174,19 @@ export function App() {
     });
     if (focused && !present.has(focused)) setFocused(undefined);
   }, [devices, focused]);
+
+  useEffect(() => {
+    const desktop = desktopRef.current;
+    if (!desktop) return;
+    const measure = () => setDesktopHeight(Math.max(600, ...Array.from(desktop.children, (child) => {
+      const el = child as HTMLElement;
+      return el.offsetTop + el.offsetHeight + 24;
+    })));
+    const observer = new ResizeObserver(measure);
+    Array.from(desktop.children).forEach((child) => observer.observe(child));
+    measure();
+    return () => observer.disconnect();
+  }, [devices, positions]);
 
   // Tiles read selection through a ref so their handlers aren't recreated on every change.
   const stateRef = useRef({ broadcast, selected });
@@ -184,7 +248,7 @@ export function App() {
   );
 
   return (
-    <div className="app">
+    <div className="app" style={{ gridTemplateColumns: `minmax(0, 1fr) ${sideWidth}px` }}>
       <header className="topbar">
         <div className="brand">AdbDepot</div>
         <button className="btn primary conn-open" onClick={() => setConnOpen(true)} title="无线扫描 / 配对 / USB 转无线">
@@ -242,8 +306,9 @@ export function App() {
             </button>
           </div>
         ) : (
-          <div className="grid">
-            {devices.map((d) => (
+          <div className="device-desktop" ref={desktopRef} style={{ height: desktopHeight }}>
+            {devices.map((d, index) => (
+              <div key={d.serial} className="device-window" style={{ left: positions[d.serial]?.x ?? index * 36, top: positions[d.serial]?.y ?? index * 36, zIndex: stack.indexOf(d.serial) + 1 }} onPointerDownCapture={() => raiseTile(d.serial)}>
               <DeviceTile
                 key={d.serial}
                 device={d}
@@ -254,16 +319,26 @@ export function App() {
                 streamKey={streamKey}
                 width={widthOf(d.serial)}
                 targets={() => targetsFor(d.serial)}
+                position={positions[d.serial] ?? { x: index * 36, y: index * 36 }}
+                onMove={(position) => setPositions((prev) => ({ ...prev, [d.serial]: position }))}
                 onResize={(w) => resizeTile(d.serial, w)}
                 onToggleSelect={() => toggle(d.serial)}
                 onToggleFocus={() => toggleFocus(d.serial)}
               />
+              </div>
             ))}
           </div>
         )}
       </main>
 
       <aside className="sidebar">
+        {/* 拖这条改宽度，双击回到默认 340 */}
+        <div
+          className="side-grip"
+          title="拖动调整操作栏宽度（双击恢复默认）"
+          onPointerDown={startSideDrag}
+          onDoubleClick={() => setSideWidth(340)}
+        />
         <nav className="tabs">
           <button className={tab === "actions" ? "active" : ""} onClick={() => setTab("actions")}>
             {t("tab.actions")}

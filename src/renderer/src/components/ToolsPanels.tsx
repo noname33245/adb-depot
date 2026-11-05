@@ -85,12 +85,24 @@ export function AppsPanel({ serial }: { serial?: string }) {
         {shown.map((a) => (
           <div className="tool-row" key={a.packageName}>
             <div className="tool-row-main">
-              <span className="tool-name" title={a.packageName}>
+              <button
+                className="tool-name tool-link"
+                title={`启动 ${a.packageName}`}
+                disabled={busy}
+                onClick={() => void act("启动", () => window.farm.apps.launch(serial, a.packageName))}
+              >
                 {a.packageName}
-              </span>
+              </button>
               <span className="tool-sub">{a.system ? "系统" : "用户"}</span>
             </div>
             <div className="tool-actions">
+              <button
+                className="btn primary"
+                disabled={busy}
+                onClick={() => void act("启动", () => window.farm.apps.launch(serial, a.packageName))}
+              >
+                启动
+              </button>
               <button className="btn" disabled={busy} onClick={() => void act("停用", () => window.farm.apps.setEnabled(serial, a.packageName, false))}>
                 停用
               </button>

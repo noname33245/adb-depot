@@ -49,6 +49,21 @@ export function ActionsPanel({ targets, run }: Props) {
       </section>
 
       <section>
+        <h3>{t("actions.screen")}</h3>
+        <button
+          className="btn wide"
+          disabled={disabled}
+          onClick={() => void run(t("actions.screen"), (serials) => window.farm.control.privacy(serials))}
+        >
+          {t("actions.screenOff")}
+        </button>
+        <button className="btn wide" disabled={disabled} onClick={() => void exec("privacyOff", t("actions.screenOn"), window.farm.control.privacyOff)}>
+          {t("actions.screenOn")}
+        </button>
+        <p className="hint">{t("actions.privacyHint")}</p>
+      </section>
+
+      <section>
         <h3>{t("actions.text")}</h3>
         <form
           className="row"

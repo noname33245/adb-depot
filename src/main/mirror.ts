@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
+import { clipboard } from "electron";
 import { AdbScrcpyClient, AdbScrcpyOptions3_3_3 } from "@yume-chan/adb-scrcpy";
 import {
   AndroidKeyCode,
+  AndroidScreenPowerMode,
   AndroidKeyEventAction,
   AndroidMotionEventAction,
   DefaultServerPath,
@@ -11,7 +13,7 @@ import {
 import { ReadableStream } from "@yume-chan/stream-extra";
 import { t } from "@shared/i18n";
 import { DEFAULT_STREAM } from "@shared/settings";
-import type { NavKey, StreamSettings, TouchEvent, VideoPacket } from "@shared/types";
+import type { DeviceResult, NavKey, StreamSettings, TouchEvent, VideoPacket } from "@shared/types";
 import type { DeviceManager } from "./devices";
 
 
@@ -23,6 +25,9 @@ const KEYS: Record<NavKey, AndroidKeyCode> = {
   volume_up: AndroidKeyCode.VolumeUp,
   volume_down: AndroidKeyCode.VolumeDown,
 };
+
+/** KEYCODE_WAKEUP，库里的 AndroidKeyCode 没导出，只能直接用数值。 */
+const WAKEUP_KEY = 224;
 
 const TOUCH_ACTIONS = {
   down: AndroidMotionEventAction.Down,
@@ -56,6 +61,8 @@ export class MirrorManager {
     private readonly sink: MirrorSink,
     /** Read on every session start, so settings changes apply on reconnect. */
     private readonly stream: () => StreamSettings = () => DEFAULT_STREAM,
+    /** 手机剪贴板 → 电脑，实时读设置，关掉立刻停。 */
+    private readonly syncClipboard: () => boolean = () => false,
   ) {
     this.#server = readFile(serverPath);
   }
@@ -116,8 +123,10 @@ export class MirrorManager {
       videoBitRate: Math.round(quality.bitRate * 1_000_000),
       maxFps: quality.maxFps,
       stayAwake: quality.stayAwake,
-      clipboardAutosync: false,
       tunnelForward: true,
+      // 必须开启：中文等非 ASCII 字符只能靠「写剪贴板 + 粘贴」输入，
+      // 关掉后服务端会直接忽略 SET_CLIPBOARD，表现就是打字没反应。
+      clipboardAutosync: true,
       scid: ScrcpyInstanceId.random(),
     });
 
@@ -132,10 +141,78 @@ export class MirrorManager {
     video.sizeChanged(({ width, height }) => this.sink.size(serial, width, height));
     void this.#pump(serial, session);
 
+    // 手机 → 电脑：服务端在剪贴板变化时推送内容
+    const clip = client.clipboard;
+    if (clip) void this.#drainClipboard(serial, clip);
+
+    // 电脑 → 手机：本地剪贴板没有变更事件，只能轮询
+    this.#startClipboardWatch();
+
+
+
     // Server logs must be drained, otherwise the stream can stall.
     void drainLog(serial, client.output);
 
     return session;
+  }
+
+  /** 双向同步用的「上一次内容」，两个方向共用，避免自己把自己推回去变成死循环。 */
+  #lastClipboard = "";
+  #clipTimer: NodeJS.Timeout | undefined;
+
+  #startClipboardWatch(): void {
+    if (this.#clipTimer) return;
+    this.#clipTimer = setInterval(() => void this.#pullClipboard(), 1200);
+    this.#clipTimer.unref();
+  }
+
+  /** 电脑剪贴板 → 手机。Electron 44 起剪贴板 API 是异步的。 */
+  async #pullClipboard(): Promise<void> {
+    if (!this.syncClipboard() || this.#sessions.size === 0) return;
+    let text = "";
+    try {
+      text = await clipboard.readText();
+    } catch {
+      return;
+    }
+    if (!text || text === this.#lastClipboard) return;
+    this.#lastClipboard = text;
+    await this.#pushClipboard(text);
+  }
+
+  /** 把电脑剪贴板写进每台在线手机的剪贴板（不触发粘贴）。 */
+  async #pushClipboard(text: string): Promise<void> {
+    for (const pending of this.#sessions.values()) {
+      try {
+        const session = await pending;
+        const ctl = session.client.controller;
+        if (!ctl) continue;
+        await ctl.setClipboard({ sequence: 0n, paste: false, content: text });
+      } catch {
+        // 设备刚断开，跳过
+      }
+    }
+  }
+
+  /** 手机剪贴板变化 → 写到电脑剪贴板。 */
+  async #drainClipboard(serial: string, stream: ReadableStream<string>): Promise<void> {
+    try {
+      const reader = stream.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        if (!value || !this.syncClipboard() || value === this.#lastClipboard) continue;
+        this.#lastClipboard = value;
+        try {
+          await clipboard.writeText(value);
+        } catch {
+          // 剪贴板被别的程序占用，忽略
+        }
+        console.log(`[clipboard ${serial}] 已同步到电脑`);
+      }
+    } catch {
+      // 会话结束时流被关闭
+    }
   }
 
   async #pump(serial: string, session: Session): Promise<void> {
@@ -169,6 +246,8 @@ export class MirrorManager {
     this.#sessions.delete(serial);
     try {
       const { client } = await pending;
+      // 会话结束前把显示电源还原：隐私屏是手动的，不能关掉软件后手机还黑着
+      await client.controller?.setScreenPowerMode(AndroidScreenPowerMode.Normal).catch(() => {});
       await client.close();
     } catch {
       // already closed or never opened
@@ -227,10 +306,17 @@ export class MirrorManager {
 
   async textOne(serial: string, text: string): Promise<void> {
     const { ctl } = await this.#controlled(serial);
-    // injectText goes through the key character map and silently drops non-ASCII (e.g. Cyrillic);
-    // pasting via the clipboard works for any text. Sequence 0 means no ack is awaited.
-    if (/^[\x20-\x7e\t\n]*$/.test(text)) await ctl.injectText(text);
-    else await ctl.setClipboard({ sequence: 0n, paste: true, content: text });
+    // injectText 走键盘字符映射表，非法字符会被静默丢掉（中文、表情都不行）；
+    // 剪贴板粘贴对任何文字都有效，所以中文走剪贴板。
+    if (/^[\x20-\x7e\t\n]*$/.test(text)) {
+      try {
+        await ctl.injectText(text);
+        return;
+      } catch {
+        // 没有输入焦点时 injectText 会失败，退回剪贴板
+      }
+    }
+    await ctl.setClipboard({ sequence: 0n, paste: true, content: text });
   }
 
   async touch(serials: string[], event: TouchEvent): Promise<void> {
@@ -260,8 +346,52 @@ export class MirrorManager {
   }
 
   async text(serials: string[], text: string): Promise<void> {
-    await Promise.all(serials.map((serial) => this.textOne(serial, text).catch(() => {})));
+    await Promise.all(
+      serials.map((serial) =>
+        this.textOne(serial, text).catch((e: unknown) => {
+          // 别静默吞掉：文字输入失败时至少要能在控制台看到原因
+          console.warn(`[mirror ${serial}] 文字输入失败:`, e instanceof Error ? e.message : e);
+        }),
+      ),
+    );
   }
+
+  /**
+   * 开关手机自己的屏幕。
+   *
+   * 走 scrcpy 的 SET_SCREEN_POWER_MODE 控制消息（就是官方 --turn-screen-off 的实现）：
+   * 只把显示器电源关掉，不锁屏、不中断编码，所以电脑上的画面和触控都还在。
+   */
+  /**
+   * 隐私屏：把手机自己的显示器电源关掉，电脑上的画面和触控照旧。
+   *
+   * 部分 ROM 需要完整的休眠、唤醒周期才能恢复物理显示器。
+   */
+  async setScreenOn(serials: string[]): Promise<DeviceResult[]> {
+    return this.devices.forEach(serials, async (serial) => {
+      const { ctl } = await this.#controlled(serial);
+      await restorePhysicalScreen(
+        () => ctl.setScreenPowerMode(AndroidScreenPowerMode.Normal),
+        (command) => this.devices.shell(serial, command, 5000),
+      );
+      return "已执行：恢复屏幕电源 → 锁屏 → 唤醒；如显示锁屏界面，请解锁手机";
+    });
+  }
+
+  async setScreenOff(): Promise<DeviceResult[]> {
+    const out: DeviceResult[] = [];
+    for (const serial of [...this.#sessions.keys()]) {
+      try {
+        const { ctl } = await this.#controlled(serial);
+        await ctl.setScreenPowerMode(AndroidScreenPowerMode.Off);
+        out.push({ serial, success: true, output: "已开启隐私屏" });
+      } catch (e) {
+        out.push({ serial, success: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return out;
+  }
+
 }
 
 async function drainLog(serial: string, output: ReadableStream<string>): Promise<void> {
@@ -277,10 +407,24 @@ async function drainLog(serial: string, output: ReadableStream<string>): Promise
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 function clamp(v: number, min: number, max: number): number {
   return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : 0;
 }
 
 function clamp01(v: number): number {
   return clamp(v, 0, 1);
+}
+
+/** Cycle logical sleep/wake: WAKEUP alone is ignored while Android is awake. */
+export async function restorePhysicalScreen(normal: () => Promise<void>, shell: (command: string) => Promise<unknown>): Promise<void> {
+  await normal();
+  await shell("input keyevent 223");
+  await sleep(600);
+  await shell("input keyevent 224");
+  await sleep(600);
+  await normal();
 }

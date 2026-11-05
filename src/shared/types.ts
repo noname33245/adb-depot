@@ -165,6 +165,8 @@ export interface AppSettings {
   cacheAutoClean: boolean;
   /** 缓存保留天数（1–365），超过这个天数的缓存文件会被删掉。 */
   cacheDays: number;
+  /** 电脑与手机剪贴板自动互相同步。 */
+  syncClipboard: boolean;
 }
 
 export interface CacheStat {
@@ -233,6 +235,9 @@ export interface FarmApi {
     scroll(serials: string[], x: number, y: number, dx: number, dy: number): void;
     key(serials: string[], key: NavKey): void;
     text(serials: string[], text: string): void;
+    /** 开启隐私屏（手机黑屏，电脑照常操作）。单向操作。 */
+    privacy(serials: string[]): Promise<DeviceResult[]>;
+    privacyOff(serials: string[]): Promise<DeviceResult[]>;
   };
   batch: {
     shell(serials: string[], command: string): Promise<DeviceResult[]>;
@@ -249,6 +254,8 @@ export interface FarmApi {
     setEnabled(serial: string, pkg: string, enable: boolean): Promise<string>;
     clearData(serial: string, pkg: string): Promise<string>;
     forceStop(serial: string, pkg: string): Promise<string>;
+    /** 启动应用，返回启动了哪个组件。 */
+    launch(serial: string, pkg: string): Promise<string>;
     /** 先让用户选 APK，再推给设备安装，返回 adb 输出。 */
     installFile(serial: string): Promise<string | undefined>;
   };

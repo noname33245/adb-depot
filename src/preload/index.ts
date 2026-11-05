@@ -36,6 +36,8 @@ const api: FarmApi = {
     scroll: (serials, x, y, dx, dy) => ipcRenderer.send("control:scroll", serials, x, y, dx, dy),
     key: (serials, key) => ipcRenderer.send("control:key", serials, key),
     text: (serials, text) => ipcRenderer.send("control:text", serials, text),
+    privacyOff: (serials) => ipcRenderer.invoke("control:privacyOff", serials),
+    privacy: (serials) => ipcRenderer.invoke("control:privacy", serials),
   },
   batch: {
     shell: (serials, command) => ipcRenderer.invoke("batch:shell", serials, command),
@@ -52,6 +54,7 @@ const api: FarmApi = {
     setEnabled: (serial, pkg, enable) => ipcRenderer.invoke("apps:setEnabled", serial, pkg, enable),
     clearData: (serial, pkg) => ipcRenderer.invoke("apps:clearData", serial, pkg),
     forceStop: (serial, pkg) => ipcRenderer.invoke("apps:forceStop", serial, pkg),
+    launch: (serial, pkg) => ipcRenderer.invoke("apps:launch", serial, pkg),
     installFile: (serial) => ipcRenderer.invoke("apps:installFile", serial),
   },
   files: {

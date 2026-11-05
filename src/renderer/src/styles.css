@@ -1664,3 +1664,63 @@ body.tile-resizing {
 .settings-row > .input.cache-days {
   width: 96px;
 }
+
+/* 应用名做成可点击的「启动」按钮 */
+.tool-name.tool-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+}
+
+.tool-name.tool-link:hover:not(:disabled) {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* --- 右侧操作栏拖动调整宽度 --- */
+
+.sidebar {
+  position: relative;
+}
+
+.side-grip {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  z-index: 6;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+/* 平时是一条几乎看不见的线，鼠标靠近才亮起来 */
+.side-grip::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.side-grip:hover::after,
+.side-grip:active::after {
+  background: var(--accent);
+}
+
+body.side-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.device-desktop { position: relative; min-width: 100%; isolation: isolate; }
+.device-window { position: absolute; }
+.device-window .tile { max-width: none; }
+.device-window .tile-header { cursor: grab; touch-action: none; user-select: none; }
+.device-window .tile-header:active { cursor: grabbing; }

@@ -341,8 +341,70 @@ export class AdbTools {
     }
   }
 
+  /**
+   * 删除设备上的文件/目录。
+   *
+   * 不能直接 `shell rm -rf` 然后看退出码：/sdcard 是 FUSE 挂载，
+   * 目录里只要有一个文件属于别的应用（或正被占用），rm 就会返回非 0，
+   * 但其余内容其实已经删掉了。所以以「路径是否还存在」为准，并把真实原因带出来。
+   */
+  /**
+   * 启动应用。
+   *
+   * 先解析启动组件再 `am start`，比 monkey 稳：monkey 在部分 ROM 上会直接 abort，
+   * 而且不会说明是「包不存在」还是「没有启动入口」。
+   */
+  async launchApp(serial: string, pkg: string): Promise<string> {
+    if (!/^[A-Za-z0-9._]+$/.test(pkg)) throw new Error(`包名不合法：${pkg}`);
+    const resolved = await this.probeRaw(
+      ["-s", serial, "shell", `cmd package resolve-activity --brief -c android.intent.category.LAUNCHER ${pkg} 2>/dev/null | tail -n 1`],
+      20_000,
+    );
+    const comp = resolved.out.trim().split(/\s+/).pop() ?? "";
+
+    if (comp.includes("/")) {
+      const r = await this.probeRaw(["-s", serial, "shell", `am start -W -n ${comp} 2>&1`], 30_000);
+      const text = `${r.out}${r.err}`.trim();
+      if (/Error|Exception|does not exist/i.test(text)) {
+        throw new Error(`启动失败：${text.split("\n").map((l) => l.trim()).find(Boolean) ?? text}`);
+      }
+      return `已启动 ${comp}`;
+    }
+
+    // 兜底：个别 ROM 的 cmd package 输出不可用
+    const m = await this.probeRaw(
+      ["-s", serial, "shell", `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1 2>&1`],
+      30_000,
+    );
+    const out = `${m.out}${m.err}`;
+    if (/No activities found|monkey aborted/i.test(out)) {
+      throw new Error(`包 ${pkg} 没有可用的启动入口（可能已被停用或没装）`);
+    }
+    return "已启动";
+  }
+
   async removePath(serial: string, target: string): Promise<string> {
-    return this.shell(serial, `rm -rf "${target.replace(/"/g, "")}"`);
+    const safe = target.replace(/"/g, "");
+    const exists = async (): Promise<boolean> => {
+      const r = await this.probeRaw(["-s", serial, "shell", `[ -e "${safe}" ] && echo yes || echo no`], 20_000);
+      return /yes/.test(r.out);
+    };
+
+    let last = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const r = await this.probeRaw(["-s", serial, "shell", `rm -rf "${safe}" 2>&1`], 120_000);
+      last = `${r.out}${r.err}`.trim();
+      if (!(await exists())) return "已删除";
+      // 第一次失败可能是文件刚被释放，重试一次
+      if (attempt === 0) await sleep(400);
+    }
+
+    if (/Permission denied|Operation not permitted/i.test(last)) {
+      throw new Error(`没有权限删除 ${safe}：目录里有属于其他应用的文件（Android 11+ 的存储限制），可以先在手机上停用那个应用再删`);
+    }
+    if (/Read-only file system/i.test(last)) throw new Error(`${safe} 是只读系统目录，删不了`);
+    const first = last.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("rm:"));
+    throw new Error(`删除失败：${first || last.split("\n")[0] || "未知原因"}`);
   }
 
   async makeDir(serial: string, target: string): Promise<string> {

@@ -125,6 +125,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               <input type="checkbox" checked={settings.confirmDanger} onChange={(e) => set({ confirmDanger: e.target.checked })} />
               {t("set.confirmDanger")}
             </label>
+            <label className="check">
+              <input type="checkbox" checked={settings.syncClipboard} onChange={(e) => set({ syncClipboard: e.target.checked })} />
+              {t("set.syncClipboard")}
+            </label>
           </Group>
 
           <Group title={t("set.tray")} hint={t("set.trayHint")}>
