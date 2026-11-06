@@ -9,42 +9,10 @@ export interface LogEntry {
   results: (DeviceResult & { name: string })[];
 }
 
-export function LogPanel({
-  entries,
-  onClear,
-  height,
-  onHeight,
-}: {
-  entries: LogEntry[];
-  onClear: () => void;
-  height: number;
-  onHeight: (h: number) => void;
-}) {
+export function LogPanel({ entries, onClear }: { entries: LogEntry[]; onClear: () => void }) {
   const t = useT();
-  /** 拖上边缘改高度；双击恢复默认 200。 */
-  const startDrag = (e: React.PointerEvent): void => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startH = height;
-    const move = (ev: PointerEvent): void => {
-      onHeight(Math.min(620, Math.max(90, startH - (ev.clientY - startY))));
-    };
-    const up = (): void => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
   return (
-    <section className="log" style={{ height }}>
-      <div
-        className="log-grip"
-        title="拖动调整日志高度（双击恢复默认）"
-        onPointerDown={startDrag}
-        onDoubleClick={() => onHeight(200)}
-      />
+    <section className="log">
       <header className="log-header">
         <h3>{t("log.title")}</h3>
         {entries.length > 0 && (

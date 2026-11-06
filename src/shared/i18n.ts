@@ -37,6 +37,7 @@ const ru = {
 
   // Log
   "log.title": "Журнал",
+  "log.noOutput": "(нет вывода)",
   "log.clear": "очистить",
   "log.empty": "Здесь будут результаты операций.",
 
@@ -313,7 +314,7 @@ const ru = {
   "set.trayHint": "Продолжает работать после закрытия окна — зеркало не отключается",
   "set.closeToTray": "Скрывать в трей при закрытии",
   "set.minimizeToTray": "Скрывать в трей при сворачивании",
-  "set.startMinimized": "Запускать скрыто в трее",
+  "set.autoLaunchHint": "При автозапуске программа сразу сворачивается в трей; при ручном запуске открывается окно",
   "set.autoLaunch": "Запускать при входе в систему",
   "tray.show": "Показать главное окно",
   "tray.quit": "Выйти из AdbDepot",
@@ -409,6 +410,7 @@ const en: Record<MessageKey, string> = {
   "targets.all": "Applies to all: {n}",
 
   "log.title": "Log",
+  "log.noOutput": "(no output)",
   "log.clear": "clear",
   "log.empty": "Operation results will appear here.",
 
@@ -674,7 +676,7 @@ const en: Record<MessageKey, string> = {
   "set.trayHint": "Keeps running after you close the window — mirroring stays connected",
   "set.closeToTray": "Hide to tray when closing",
   "set.minimizeToTray": "Hide to tray when minimizing",
-  "set.startMinimized": "Start hidden in the tray",
+  "set.autoLaunchHint": "When started by Windows it goes straight to the tray; a manual launch opens the window",
   "set.autoLaunch": "Launch at login",
   "tray.show": "Show main window",
   "tray.quit": "Quit AdbDepot",
@@ -768,6 +770,7 @@ const zh: Record<MessageKey, string> = {
   "targets.all": "作用于全部设备：{n}",
 
   "log.title": "日志",
+  "log.noOutput": "（无输出）",
   "log.clear": "清空",
   "log.empty": "操作结果会显示在这里。",
 
@@ -1033,7 +1036,7 @@ const zh: Record<MessageKey, string> = {
   "set.trayHint": "关掉窗口也能继续跑，镜像和连接不会断",
   "set.closeToTray": "点关闭按钮时收进托盘",
   "set.minimizeToTray": "点最小化时收进托盘",
-  "set.startMinimized": "启动后直接驻留托盘（不弹窗口）",
+  "set.autoLaunchHint": "开机自启时直接驻留托盘；手动打开则正常显示主界面",
   "set.autoLaunch": "开机自动启动",
   "tray.show": "显示主窗口",
   "tray.quit": "退出 AdbDepot",
