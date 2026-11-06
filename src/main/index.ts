@@ -63,6 +63,10 @@ let tray: Tray | undefined;
 let quitting = false;
 let balloonShown = false;
 /** 只在启动时生效一次：勾了「驻留托盘」就不弹窗口。 */
+/** 开机自启时会带上这个参数，用来区分「用户手动打开」和「开机自动拉起」。 */
+const AUTOSTART_FLAG = "--autostart";
+const launchedByAutostart = process.argv.includes(AUTOSTART_FLAG);
+
 let startHiddenOnce = false;
 const updater = new Updater(() => win);
 
@@ -276,7 +280,7 @@ function hideToTray(): void {
 function buildTrayMenu(): void {
   if (!tray) return;
   const s = settings.get();
-  const toggle = (key: "closeToTray" | "minimizeToTray" | "autoLaunch" | "startMinimized") => () =>
+  const toggle = (key: "closeToTray" | "minimizeToTray" | "autoLaunch") => () =>
     void settings.update({ [key]: !settings.get()[key] });
 
   tray.setContextMenu(
@@ -286,7 +290,6 @@ function buildTrayMenu(): void {
       { label: t("set.closeToTray"), type: "checkbox", checked: s.closeToTray, click: toggle("closeToTray") },
       { label: t("set.minimizeToTray"), type: "checkbox", checked: s.minimizeToTray, click: toggle("minimizeToTray") },
       { label: t("set.autoLaunch"), type: "checkbox", checked: s.autoLaunch, click: toggle("autoLaunch") },
-      { label: t("set.startMinimized"), type: "checkbox", checked: s.startMinimized, click: toggle("startMinimized") },
       { type: "separator" },
       {
         label: t("tray.quit"),
@@ -318,7 +321,7 @@ function createTray(): void {
 function applyAutoLaunch(enabled: boolean): void {
   if (process.platform !== "win32" || !app.isPackaged) return;
   try {
-    app.setLoginItemSettings({ openAtLogin: enabled, path: app.getPath("exe") });
+    app.setLoginItemSettings({ openAtLogin: enabled, path: app.getPath("exe"), args: [AUTOSTART_FLAG] });
   } catch (e) {
     console.warn("[tray] 设置开机启动失败:", e);
   }
@@ -560,7 +563,8 @@ function registerIpc(): void {
   handle("batch:shell", (list: unknown, command: unknown) => {
     if (typeof command !== "string" || !command.trim()) throw new Error(t("err.emptyCommand"));
     // Intentionally unescaped: an operator console that runs on the phone, not on the host.
-    return devices.forEach(serials(list), (s) => devices.shell(s, command, SHELL_TIMEOUT));
+    // 把 stderr 并进 stdout，否则 grep/cmd 之类报错时日志里什么都看不到。
+    return devices.forEach(serials(list), (s) => devices.shell(s, `${command} 2>&1`, SHELL_TIMEOUT));
   });
 
   handle("batch:launchApp", (list: unknown, pkg: unknown) => {
@@ -745,7 +749,9 @@ function registerIpc(): void {
 // A second instance would fight over device sessions and the same data files.
 if (!app.requestSingleInstanceLock()) app.exit(0);
 
-app.on("second-instance", () => {
+app.on("second-instance", (_event, argv) => {
+  // 开机自启如果被拉起两次，第二次不该把刚藏好的窗口弹出来
+  if (argv.includes(AUTOSTART_FLAG)) return;
   showWindow();
 });
 
@@ -769,8 +775,7 @@ app.whenReady().then(async () => {
     if (
       next.closeToTray !== prev.closeToTray ||
       next.minimizeToTray !== prev.minimizeToTray ||
-      next.autoLaunch !== prev.autoLaunch ||
-      next.startMinimized !== prev.startMinimized
+      next.autoLaunch !== prev.autoLaunch
     ) {
       buildTrayMenu();
     }
@@ -798,7 +803,8 @@ app.whenReady().then(async () => {
   // 启动先清一遍过期缓存，之后每 12 小时一次
   if (settings.get().cacheAutoClean) void cleanNow().catch(() => {});
   scheduleCacheClean();
-  startHiddenOnce = settings.get().startMinimized;
+  // 只有开机自启那一次才藏到托盘；手动双击打开的，一律正常显示主界面
+  startHiddenOnce = launchedByAutostart;
   createWindow();
   updater.start();
 

@@ -20,7 +20,6 @@ export function defaultSettings(language: Lang): AppSettings {
     closeToTray: true,
     minimizeToTray: false,
     autoLaunch: false,
-    startMinimized: false,
     cacheAutoClean: true,
     cacheDays: 7,
     syncClipboard: true,
@@ -92,7 +91,6 @@ export function mergeSettings(base: AppSettings, patch: unknown): AppSettings {
   if (p.closeToTray !== undefined) next.closeToTray = bool(p.closeToTray, "closeToTray");
   if (p.minimizeToTray !== undefined) next.minimizeToTray = bool(p.minimizeToTray, "minimizeToTray");
   if (p.autoLaunch !== undefined) next.autoLaunch = bool(p.autoLaunch, "autoLaunch");
-  if (p.startMinimized !== undefined) next.startMinimized = bool(p.startMinimized, "startMinimized");
   if (p.cacheAutoClean !== undefined) next.cacheAutoClean = bool(p.cacheAutoClean, "cacheAutoClean");
   if (p.cacheDays !== undefined) next.cacheDays = Math.round(range(p.cacheDays, 0, 365, "cacheDays"));
   if (p.syncClipboard !== undefined) next.syncClipboard = bool(p.syncClipboard, "syncClipboard");

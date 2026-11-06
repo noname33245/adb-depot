@@ -141,13 +141,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               {t("set.minimizeToTray")}
             </label>
             <label className="check">
-              <input type="checkbox" checked={settings.startMinimized} onChange={(e) => set({ startMinimized: e.target.checked })} />
-              {t("set.startMinimized")}
-            </label>
-            <label className="check">
               <input type="checkbox" checked={settings.autoLaunch} onChange={(e) => set({ autoLaunch: e.target.checked })} />
               {t("set.autoLaunch")}
             </label>
+            <p className="hint">{t("set.autoLaunchHint")}</p>
           </Group>
 
           <Group title={t("set.cache")} hint={t("set.cacheHint")}>

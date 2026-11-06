@@ -160,7 +160,6 @@ export interface AppSettings {
   /** 开机自动启动。 */
   autoLaunch: boolean;
   /** 启动后不弹窗口，直接驻留托盘。 */
-  startMinimized: boolean;
   /** 启动时自动清理过期缓存。 */
   cacheAutoClean: boolean;
   /** 缓存保留天数（1–365），超过这个天数的缓存文件会被删掉。 */
