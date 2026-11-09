@@ -47,6 +47,8 @@ export function ConnectionCenter({ onClose }: Props) {
   const [history, setHistory] = useState<ConnHistoryItem[]>([]);
   const [log, setLog] = useState<LogLine[]>([]);
   const [autoMdns, setAutoMdns] = useState(true);
+  /** 扫完本网段后扩扫同一 /16 的相邻网段（校园网常被切成多个 /21）。 */
+  const [expandNearby, setExpandNearby] = useState(true);
   const [busyAddr, setBusyAddr] = useState("");
 
   const [manualIp, setManualIp] = useState("");
@@ -62,11 +64,21 @@ export function ConnectionCenter({ onClose }: Props) {
 
   const [diag, setDiag] = useState<DiagnoseResult | null>(null);
 
+  /**
+   * 手动添加的网段。
+   * 校园网 / 公司网常被切成多个 /21，设备和本机不在同一个广播域里，
+   * 按网卡自动展开根本扫不到；这里允许直接填对方的网段。
+   */
+  const [extraNets, setExtraNets] = useState<NetworkInfo[]>([]);
+  const [manualCidr, setManualCidr] = useState("");
+
   const logId = useRef(0);
   const logRef = useRef<HTMLDivElement | null>(null);
   /** 用户主动取消勾选的网段，自动刷新网卡时不要替他重新勾上。 */
   const manualOff = useRef<Set<string>>(new Set());
   const netsRef = useRef<NetworkInfo[]>([]);
+  /** 扩扫阶段 total 会变大，用它识别「进度条变短」是加了一轮而不是出错。 */
+  const scanTotalRef = useRef(0);
 
   const push = useCallback((kind: LogLine["kind"], text: string) => {
     logId.current += 1;
@@ -188,8 +200,12 @@ export function ConnectionCenter({ onClose }: Props) {
       window.farm.wireless.onProgress((p) => {
         setProgress(p);
         if (p.targets && p.targets.length > 0) mergeTargets(p.targets);
+        if (p.phase === "nearby" && p.total > scanTotalRef.current && scanTotalRef.current > 0) {
+          push("info", `本网段扫完，开始扩扫相邻网段：本轮共 ${p.total} 个地址`);
+        }
+        scanTotalRef.current = p.total;
       }),
-    [mergeTargets],
+    [mergeTargets, push],
   );
 
   useEffect(() => {
@@ -209,40 +225,79 @@ export function ConnectionCenter({ onClose }: Props) {
     return [...new Set([...raw, ...fromMdns, ...fromHistory])];
   }, [portText, targets, history]);
 
+  /** 接受 172.29.200.0/21，或者单个 IP（自动按 /24 处理）。 */
+  const addCidr = (): void => {
+    const raw = manualCidr.trim();
+    if (!raw) return;
+    let cidr = raw;
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(raw)) cidr = `${raw.replace(/\.\d+$/, ".0")}/24`;
+    if (!/^\d+\.\d+\.\d+\.\d+\/\d+$/.test(cidr) || Number(cidr.split("/")[1]) < 16) {
+      push("warn", "网段格式不对，例：172.29.200.0/21（不能大于 /16）");
+      return;
+    }
+    if (nets.some((n) => n.cidr === cidr) || extraNets.some((n) => n.cidr === cidr)) {
+      push("info", `${cidr} 已经在列表里了`);
+      return;
+    }
+    setExtraNets((prev) => [...prev, { name: "手动", address: "", cidr, virtual: false }]);
+    setPicked((prev) => new Set(prev).add(cidr));
+    setManualCidr("");
+  };
+
   const scan = async (): Promise<void> => {
     // 扫描前重读网卡：刚开的热点、刚连的 Wi-Fi 要立刻纳入范围。
     const fresh = await loadNets(true);
-    const cidrs = fresh
-      .filter((x) => picked.has(x.cidr) || (!x.virtual && !manualOff.current.has(x.cidr)))
-      .map((x) => x.cidr);
+    const cidrs = [
+      ...new Set([
+        ...fresh
+          .filter((x) => picked.has(x.cidr) || (!x.virtual && !manualOff.current.has(x.cidr)))
+          .map((x) => x.cidr),
+        ...extraNets.filter((n) => picked.has(n.cidr)).map((n) => n.cidr),
+      ]),
+    ];
     if (cidrs.length === 0) {
       push("warn", "没有可扫的网段：至少勾选一个，或确认网卡已拿到 IP");
       return;
     }
     setScanning(true);
-    setProgress({ done: 0, total: 0, found: 0, running: true });
-    push("info", `开始扫描 ${cidrs.join("、")}，端口 ${ports.join(", ")}`);
+    scanTotalRef.current = 0;
+    setProgress({ done: 0, total: 0, found: 0, running: true, phase: "primary" });
+    push("info", `开始扫描 ${cidrs.join("、")}，端口 ${ports.join(", ")}${expandNearby ? "，扫完扩相邻网段" : ""}`);
     try {
-      const found = await window.farm.wireless.scan({ cidrs, ports });
-      mergeTargets(found);
-      const real = found.filter((f) => f.protocol === "adbd" || f.protocol === "tls").length;
-      const hosts = found.filter((f) => f.protocol === "host").length;
+      // IPv6 链路本地一般 1 秒内就出结果，先单独推给列表：
+      // 校园网 IPv4 那几千个地址要扫十几秒，不能让唯一的可用候选陪着等。
+      const v6Promise = window.farm.wireless.ipv6(ports).catch(() => [] as WirelessTarget[]);
+      void v6Promise.then((via6) => {
+        if (via6.length === 0) return;
+        mergeTargets(via6);
+        push("ok", `IPv6 链路本地发现 ${via6.length} 个 ADB 端口：这条通道不过网关，跨 VLAN 也能直连`);
+      });
+      const found = await window.farm.wireless.scan({ cidrs, ports, expandNearby });
+      // IPv4 扫描和 IPv6 发现是两条路，统计要合起来算，
+      // 否则「只有 IPv6 命中」会被误报成「什么都没扫到」。
+      const via6 = await v6Promise;
+      const unique = new Map<string, WirelessTarget>();
+      for (const t of [...found, ...via6]) unique.set(`${t.ip}:${t.port}`, t);
+      const results = [...unique.values()];
+      mergeTargets(results);
+      const real = results.filter((f) => f.protocol === "adbd" || f.protocol === "tls").length;
+      const hosts = results.filter((f) => f.protocol === "host").length;
       if (real > 0) {
-        push("ok", `扫描结束：${found.length} 个端口有响应，其中 ${real} 个是真正的 ADB${found.length > real ? "（其余可能是网关假响应）" : ""}`);
+        push("ok", `扫描结束：${results.length} 个端口有响应，其中 ${real} 个是真正的 ADB${results.length > real ? "（其余可能是网关假响应）" : ""}`);
       } else if (hosts > 0) {
         push(
           "warn",
           `扫描结束：网内有 ${hosts} 台设备在线，但都没有开 ADB 端口 —— 手机多半是 adbd 退回 USB 模式了。` +
             "插一次数据线，在右边「USB 转无线」里选中它并点「转为无线」。",
         );
-      } else if (found.length > 0) {
-        push("warn", `扫描结束：${found.length} 个端口有响应，但都不是真正的 ADB（网关假响应），没有可连的手机`);
+      } else if (results.length > 0) {
+        push("warn", `扫描结束：${results.length} 个端口有响应，但都不是真正的 ADB（网关假响应），没有可连的手机`);
       } else {
         // 空结果最常见的原因是手机 adbd 退回了 USB 模式，光说「没扫到」没法排查。
         push(
           "warn",
-          "没扫到任何 ADB 端口，网内也没发现其他在线主机。确认手机已连上这个热点（不是同名 Wi-Fi），" +
-            "再插一次数据线用「USB 转无线」；或在开发者选项里打开「无线调试」。",
+          "没扫到任何 ADB 端口，网内也没发现其他在线主机。确认手机和电脑连的是同一个 WiFi；" +
+            "校园网跨网段时，候选里会出现 [fe80::…] 的「IPv6 直连」，点它旁边的连接就行。",
         );
       }
     } catch (e) {
@@ -391,7 +446,7 @@ export function ConnectionCenter({ onClose }: Props) {
   const wirelessOnline = online.filter((d) => d.wireless);
   const usbDevices = adb.filter((d) => !d.wireless && d.state === "device");
   const scanPercent = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
-  const scanHosts = nets
+  const scanHosts = [...nets, ...extraNets]
     .filter((n) => picked.has(n.cidr))
     .reduce((sum, n) => {
       const bits = Number(n.cidr.split("/")[1] ?? 24);
@@ -459,7 +514,7 @@ export function ConnectionCenter({ onClose }: Props) {
             <div className="conn-section-title">
               扫描范围
               <span className="conn-section-hint">
-                {picked.size} / {nets.length} 个网段 · 约 {scanHosts} 个地址
+                {picked.size} / {nets.length + extraNets.length} 个网段 · 本段约 {scanHosts} 个地址{expandNearby ? " · 追加相邻网段" : ""}
               </span>
             </div>
             <div className="conn-nets">
@@ -472,6 +527,46 @@ export function ConnectionCenter({ onClose }: Props) {
                   {n.virtual && <span className="conn-tag">虚拟</span>}
                 </label>
               ))}
+              {extraNets.map((n) => (
+                <label className="conn-net" key={`manual-${n.cidr}`}>
+                  <input type="checkbox" checked={picked.has(n.cidr)} onChange={() => toggleCidr(n.cidr)} />
+                  <span className="conn-net-name">{n.name}</span>
+                  <span className="conn-net-cidr mono">{n.cidr}</span>
+                  <button
+                    className="conn-tag"
+                    style={{ cursor: "pointer", border: "none", background: "none" }}
+                    title="移除"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setExtraNets((prev) => prev.filter((x) => x.cidr !== n.cidr));
+                      setPicked((prev) => {
+                        const next = new Set(prev);
+                        next.delete(n.cidr);
+                        return next;
+                      });
+                    }}
+                  >
+                    移除
+                  </button>
+                </label>
+              ))}
+              <div className="conn-net-add">
+                <input
+                  className="input"
+                  placeholder="一般不用填：默认自动扩扫相邻网段"
+                  value={manualCidr}
+                  onChange={(e) => setManualCidr(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addCidr();
+                    }
+                  }}
+                />
+                <button className="btn" onClick={addCidr}>
+                  添加
+                </button>
+              </div>
             </div>
 
             <div className="conn-inline">
@@ -482,6 +577,10 @@ export function ConnectionCenter({ onClose }: Props) {
               <label className="conn-check">
                 <input type="checkbox" checked={autoMdns} onChange={(e) => setAutoMdns(e.target.checked)} />
                 自动发现
+              </label>
+              <label className="conn-check" title="扫完本网段后，继续扫同一 /16 内的相邻网段；关掉可省约 10 秒">
+                <input type="checkbox" checked={expandNearby} onChange={(e) => setExpandNearby(e.target.checked)} />
+                扩扫相邻网段
               </label>
             </div>
 
@@ -508,7 +607,9 @@ export function ConnectionCenter({ onClose }: Props) {
                   <div style={{ width: `${scanPercent}%` }} />
                 </div>
                 <span className="conn-progress-text">
-                  {progress ? `${progress.done} / ${progress.total} · 命中 ${progress.found}` : "准备中"}
+                  {progress
+                    ? `${progress.phase === "nearby" ? "相邻网段" : "本网段"} ${progress.done} / ${progress.total} · 命中 ${progress.found}`
+                    : "准备中"}
                 </span>
               </div>
             )}
@@ -536,7 +637,16 @@ export function ConnectionCenter({ onClose }: Props) {
                 return (
                   <div className="conn-row" key={key}>
                     <div className="conn-row-main">
-                      <span className="conn-addr mono">{key}</span>
+                      <span
+                        className="conn-addr mono"
+                        title={
+                          t.via6
+                            ? "IPv6 链路本地地址：不过三层网关，跨 VLAN 也能直连。连接后会核对手机的实际 IPv4，不会连错人。"
+                            : undefined
+                        }
+                      >
+                        {key}
+                      </span>
                       <span className="conn-row-tags">
                         {t.kind === "mdns" ? <span className="conn-tag">mDNS</span> : <span className="conn-tag">扫描</span>}
                         {t.pairing && <Badge kind="warn" text="配对端口" />}

@@ -6,6 +6,7 @@ import { createConnection } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { promisify } from "node:util";
+import { linkLocalNeighbors, probeAdb6, v6Serial } from "./ipv6link";
 import type {
   AdbDeviceRow,
   AppEntry,
@@ -14,6 +15,7 @@ import type {
   DeviceStats,
   DiagnoseResult,
   FileEntry,
+  HotspotInfo,
   NetworkInfo,
   ScanProgress,
   ScanRequest,
@@ -74,6 +76,47 @@ function expandCidr(cidr: string, maxHosts: number): string[] {
   const last = bits >= 31 ? net + (bits === 32 ? 0 : 1) : net + size - 2;
   const out: string[] = [];
   for (let n = first; n <= last && out.length < maxHosts; n++) out.push(intToIp(n));
+  return out;
+}
+
+/**
+ * 同一 /16 内与给定网段相邻的块。
+ *
+ * 校园网 / 企业网经常把一个 /16 切成很多 /21，手机和电脑因此不在同一个广播域：
+ * 直连能通（走三层路由），但按网卡网段展开永远扫不到。
+ * 这里按同前缀大小向两侧扩几块，能把同一片地址里的设备捞出来。
+ */
+function neighborCidrs(cidrs: string[], span: number, budget: number): string[] {
+  const out: string[] = [];
+  const seen = new Set(cidrs);
+  // 大块网段（/21 之类）先分配预算：热点 /24 要是排在前面，会先把额度吃光，
+  // 结果真正要找的隔壁 /21 反而一块都扩不出去。
+  const ordered = [...cidrs].sort((a, b) => Number(a.split("/")[1] ?? 24) - Number(b.split("/")[1] ?? 24));
+
+  for (const cidr of ordered) {
+    const [base, bitsRaw] = cidr.split("/");
+    const bits = Number(bitsRaw ?? 24);
+    if (!base || Number.isNaN(bits) || bits < 20 || bits > 30) continue;
+
+    const mask = (0xffffffff << (32 - bits)) >>> 0;
+    const net = (ipToInt(base) & mask) >>> 0;
+    const size = 2 ** (32 - bits);
+
+    for (let k = 1; k <= span; k++) {
+      for (const dir of [1, -1]) {
+        if (budget < size) break;
+        const cand = net + dir * k * size;
+        if (cand < 0 || cand > 0xffffffff) continue;
+        // 只在同一个 /16 里扩，跨大段没意义
+        if (cand >>> 16 !== net >>> 16) continue;
+        const next = `${intToIp(cand >>> 0)}/${bits}`;
+        if (seen.has(next)) continue;
+        seen.add(next);
+        out.push(next);
+        budget -= size;
+      }
+    }
+  }
   return out;
 }
 
@@ -407,6 +450,20 @@ export class AdbTools {
     throw new Error(`删除失败：${first || last.split("\n")[0] || "未知原因"}`);
   }
 
+  /** 重命名 / 移动到另一个路径（同一个 mv，目标可以带目录）。 */
+  async renamePath(serial: string, from: string, to: string): Promise<string> {
+    const a = from.replace(/"/g, "");
+    const b = to.replace(/"/g, "");
+    return this.shell(serial, `mv "${a}" "${b}" && echo ok`);
+  }
+
+  /** 复制到目标路径（目录要已存在，cp 不会自动建目录）。 */
+  async copyPath(serial: string, from: string, to: string): Promise<string> {
+    const a = from.replace(/"/g, "");
+    const b = to.replace(/"/g, "");
+    return this.shell(serial, `cp -r "${a}" "${b}" && echo ok`);
+  }
+
   async makeDir(serial: string, target: string): Promise<string> {
     return this.shell(serial, `mkdir -p "${target.replace(/"/g, "")}"`);
   }
@@ -470,6 +527,42 @@ export class AdbTools {
     return targets;
   }
 
+  /**
+   * Windows 移动热点信息。跨 VLAN 被隔离时，让手机切到这个热点就能回到同一二层网络。
+   * SSID 走 WinRT 读，密码系统不给明文，界面只提示用户去系统设置里看。
+   */
+  async hotspotInfo(): Promise<HotspotInfo> {
+    const nets = this.networks();
+    const ap =
+      nets.find((n) => /Wi-Fi Direct|本地连接\s*\*|Hosted Network|热点/i.test(n.name) && /^192\.168\./.test(n.address)) ??
+      nets.find((n) => n.address.startsWith("192.168.137."));
+    let ssid: string | undefined;
+    let on = false;
+    if (process.platform === "win32") {
+      try {
+        const script = [
+          "[Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]|Out-Null;",
+          "[Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime]|Out-Null;",
+          "$p=[Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile();",
+          "$t=[Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager]::CreateFromConnectionProfile($p);",
+          "$c=$t.GetCurrentAccessPointConfiguration();",
+          'Write-Output ("{0}|{1}" -f $c.Ssid,$t.TetheringOperationalState)',
+        ].join("");
+        const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+          timeout: 8_000,
+          windowsHide: true,
+        });
+        const last = stdout.trim().split(/\r?\n/).pop() ?? "";
+        const [name, state] = last.split("|");
+        if (name && name.trim() !== "undefined") ssid = name.trim();
+        on = /^(on|1)$/i.test((state ?? "").trim());
+      } catch {
+        // 读不到 WinRT 不影响网段，界面仍可手动填
+      }
+    }
+    return { ssid, on, cidr: ap?.cidr, address: ap?.address };
+  }
+
   async cancelScan(): Promise<void> {
     this.#scanSeq++;
   }
@@ -484,56 +577,111 @@ export class AdbTools {
     const timeout = Math.max(200, Math.min(4000, req.timeoutMs ?? 500));
     const concurrency = Math.max(4, Math.min(512, req.concurrency ?? 160));
 
-    const hosts: string[] = [];
-    const seenHost = new Set<string>();
-    for (const cidr of cidrs) {
-      for (const h of expandCidr(cidr, 4096)) {
-        if (seenHost.has(h)) continue;
-        seenHost.add(h);
-        hosts.push(h);
+    /** 按 CIDR 展开主机，去重。 */
+    const expandAll = (list: string[]): string[] => {
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const cidr of list) {
+        for (const h of expandCidr(cidr, 4096)) {
+          if (seen.has(h)) continue;
+          seen.add(h);
+          out.push(h);
+        }
       }
-    }
-    if (hosts.length === 0 || ports.length === 0) return [];
+      return out;
+    };
 
-    const jobs: Array<{ ip: string; port: number }> = [];
-    for (const ip of hosts) for (const port of ports) jobs.push({ ip, port });
-
-    const total = jobs.length;
     const found: WirelessTarget[] = [];
     let done = 0;
-    let cursor = 0;
+    let total = 0;
+    /** 本网段 / 扩扫相邻网段，界面据此解释「进度条为什么突然变短」。 */
+    let phase: "primary" | "nearby" = "primary";
     /** 上次进度之后新命中的地址，随进度一起推给界面。 */
     let pending: WirelessTarget[] = [];
 
-    const worker = async (): Promise<void> => {
-      for (;;) {
-        if (this.#scanSeq !== seq) return;
-        const index = cursor++;
-        const job = jobs[index];
-        if (!job) return;
-        const probe = await this.#probeAdb(job.ip, job.port, timeout);
-        done++;
-        if (probe.open) {
-          const hit: WirelessTarget = {
-            ip: job.ip,
-            port: job.port,
-            kind: "scan",
-            protocol: probe.protocol,
-            ready: probe.protocol === "adbd",
-          };
-          found.push(hit);
-          pending.push(hit);
+    /**
+     * 扫一批主机，进度按累计值推进。
+     * 扩展轮可以用更短的超时、更高的并发 —— 那些地址本来就不在本地广播域，
+     * 慢试探没有意义，快速排除更划算。
+     */
+    const sweep = async (
+      list: string[],
+      opts: { timeoutMs?: number; concurrency?: number } = {},
+    ): Promise<void> => {
+      const t = opts.timeoutMs ?? timeout;
+      const c = opts.concurrency ?? concurrency;
+      const jobs: Array<{ ip: string; port: number }> = [];
+      for (const ip of list) for (const port of ports) jobs.push({ ip, port });
+      if (jobs.length === 0) return;
+      total += jobs.length;
+
+      let cursor = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          if (this.#scanSeq !== seq) return;
+          const index = cursor++;
+          const job = jobs[index];
+          if (!job) return;
+          const probe = await this.#probeAdb(job.ip, job.port, t);
+          done++;
+          if (probe.open) {
+            const hit: WirelessTarget = {
+              ip: job.ip,
+              port: job.port,
+              kind: "scan",
+              protocol: probe.protocol,
+              ready: probe.protocol === "adbd",
+            };
+            found.push(hit);
+            pending.push(hit);
+          }
+          if (pending.length > 0 || done % 40 === 0 || done === total) {
+            onProgress?.({ done, total, found: found.length, running: done < total, targets: pending, phase });
+            pending = [];
+          }
         }
-        if (pending.length > 0 || done % 40 === 0 || done === total) {
-          onProgress?.({ done, total, found: found.length, running: done < total, targets: pending });
-          pending = [];
-        }
-      }
+      };
+
+      onProgress?.({ done, total, found: found.length, running: true, targets: [], phase });
+      await Promise.all(Array.from({ length: Math.min(c, jobs.length) }, () => worker()));
     };
 
-    await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
-    const cancelled = this.#scanSeq !== seq;
-    onProgress?.({ done, total, found: found.length, running: false, targets: [] });
+    // 手机 IPv4 被 VLAN 网关吞包时，端口扫描永远发现不了它；
+    // 链路本地 IPv6 是二层直达，和端口扫描并行跑，谁先出来先显示谁。
+    const v6Promise = this.ipv6Targets(ports).catch(() => [] as WirelessTarget[]);
+    void v6Promise.then((list) => {
+      if (this.#scanSeq !== seq || list.length === 0) return;
+      const merged = list.filter((t) => !found.some((f) => f.ip === t.ip && f.port === t.port));
+      if (merged.length === 0) return;
+      found.push(...merged);
+      pending.push(...merged);
+      onProgress?.({ done, total, found: found.length, running: true, targets: pending, phase });
+      pending = [];
+    });
+
+    const primary = expandAll(cidrs);
+    if (primary.length === 0) return v6Promise;
+    await sweep(primary);
+
+    let cancelled = this.#scanSeq !== seq;
+    if (cancelled) return found;
+
+    // 扫完本网段，默认继续扩到同一 /16 的相邻网段。
+    // 校园网把 172.29.0.0/16 切成很多 /21，手机常落在隔壁块里。
+    // 以前是「本段一个真 adbd 都没有才扩」，结果本段随便有台别人的 adbd
+    // 就把扩扫短路了 —— 本段命中并不能说明要找的设备也在本段。
+    if (req.expandNearby !== false) {
+      phase = "nearby";
+      const near = neighborCidrs(cidrs, 3, 8192);
+      const extra = expandAll(near.filter((c) => !cidrs.includes(c)));
+      if (extra.length > 0) {
+        onProgress?.({ done, total, found: found.length, running: true, targets: [], phase });
+        await sweep(extra, { timeoutMs: 280, concurrency: 240 });
+      }
+    }
+
+    cancelled = this.#scanSeq !== seq;
+    onProgress?.({ done, total, found: found.length, running: false, targets: [], phase });
     if (cancelled) return found;
 
     // 端口扫描之外再补一轮在线主机探测：
@@ -564,6 +712,10 @@ export class AdbTools {
         seenIp.add(ip);
         found.push({ ip, port: ports[0] ?? 5555, kind: "scan", protocol: "host" });
       }
+    }
+    // 兜底：IPv6 探测可能比扫尾慢一点，结束时再合一次（去重）。
+    for (const t of await v6Promise) {
+      if (!found.some((f) => f.ip === t.ip && f.port === t.port)) found.push(t);
     }
     return found;
   }
@@ -643,53 +795,219 @@ export class AdbTools {
     });
   }
 
-  /** 连接并等状态落定 —— `adb connect` 说 connected 不代表能用。 */
+  /** IPv6 serial 不能当 IPv4 地址去诊断，给个固定说明就行。 */
+  async #diagHint(ip: string, port: number, isV6: boolean): Promise<string | undefined> {
+    if (isV6) return "IPv6 链路本地地址会随手机 WiFi 重连变化；重新扫描一次拿新地址即可。";
+    return (await this.diagnose(ip, port)).hint;
+  }
+
+  /**
+   * 连接入口：IPv4 走正常流程，一旦失败（尤其是 VLAN 隔离）就自动改走 IPv6 链路本地。
+   * 这条回退对每台设备都一样，不需要用户切热点或碰手机。
+   */
   async connectChecked(ip: string, port: number): Promise<ConnectResult> {
-    const addr = `${ip}:${port}`;
-    let out = "";
-    try {
-      out = await this.raw(["connect", addr], 15_000);
-    } catch (e) {
-      out = e instanceof Error ? e.message : String(e);
-    }
-    const lower = out.toLowerCase();
-    if (lower.includes("failed to authenticate")) {
+    const res = await this.#connectPlain(ip, port);
+    // 只有「端口通但数据过不去」才值得绕 IPv6；端口不开 / 未授权没必要再探一遍。
+    if (res.ok || ip.startsWith("[") || (res.state !== "offline" && res.state !== "unknown")) return res;
+    const v6 = await this.connectViaIpv6(ip, port);
+    if (v6) return v6;
+    // 连 IPv6 候选都没有：把「已自动尝试」写进提示，避免文案让人以为程序没试。
+    return { ...res, hint: `${res.hint ? `${res.hint} ` : ""}已自动尝试 IPv6 链路本地直连，邻居表里没有这台手机。` };
+  }
+
+  /**
+   * 用 IPv6 链路本地绕过三层隔离，连上目标那台手机。
+   *
+   * 邻居表里可能有同宿舍其他人的手机，所以连上之后必须读一次手机的 IPv4 地址，
+   * 只有和目标 IP 一致才保留，否则立刻断开 —— 保证只作用于用户点选的这一台。
+   */
+  async connectViaIpv6(targetIp: string, port: number): Promise<ConnectResult | undefined> {
+    const neighbors = await linkLocalNeighbors();
+    if (neighbors.length === 0) return undefined;
+    const probed = await Promise.all(
+      neighbors.map(async (n) => ({ n, kind: await probeAdb6(n.addr, n.zone, port, 1200) })),
+    );
+    const candidates = probed.filter((p) => p.kind === "adbd");
+    if (candidates.length === 0) return undefined;
+
+    let tried = 0;
+    for (const { n } of candidates) {
+      const serial = v6Serial(n.addr, n.zone, port);
+      const drop = (): Promise<unknown> => this.raw(["disconnect", serial], 5_000).catch(() => "");
+      await drop();
+      try {
+        await this.raw(["connect", serial], 15_000);
+      } catch {
+        continue;
+      }
+      let state = "";
+      for (let i = 0; i < 15; i++) {
+        const row = (await this.adbDevices()).find((r) => r.serial === serial);
+        if (row) {
+          state = row.state;
+          if (state === "device" || state === "unauthorized") break;
+        }
+        await sleep(400);
+      }
+      if (state !== "device") {
+        await drop();
+        continue;
+      }
+      tried++;
+      // 身份核对：这台 IPv6 设备的 WiFi IPv4 必须就是要连的那个目标。
+      const info = await this.shell(
+        serial,
+        "ip -4 addr 2>/dev/null | grep -a 'inet '; getprop dhcp.wlan0.ipaddress 2>/dev/null",
+        8_000,
+      ).catch(() => "");
+      if (!info.includes(targetIp)) {
+        await drop();
+        continue;
+      }
+      // IPv4 那条 offline transport 留着只会碍事。
+      await this.raw(["disconnect", `${targetIp}:${port}`], 5_000).catch(() => "");
       return {
-        ok: false,
-        addr,
-        state: "unauthorized",
-        message: "手机拒绝了这台电脑的密钥",
-        hint: "手机 → 开发者选项 → 撤销 USB 调试授权；或在「无线调试 → 已配对设备」里删掉本机，再重新配对。",
+        ok: true,
+        addr: serial,
+        state: "device",
+        message: "已通过 IPv6 链路本地直连（绕过 VLAN 隔离，无需切热点）",
       };
     }
-    if (lower.includes("cannot connect") || lower.includes("failed to connect")) {
-      const diag = await this.diagnose(ip, port);
-      return { ok: false, addr, state: "closed", message: out.split("\n")[0] ?? "连接失败", hint: diag.hint };
-    }
+    return tried > 0
+      ? {
+          ok: false,
+          addr: `${targetIp}:${port}`,
+          state: "offline",
+          message: "IPv6 链路本地通道也试过了，没找到这台手机",
+          hint: "手机和电脑需要在同一个 WiFi 广播域；确认手机 WiFi 没切到别的 SSID，然后重新扫描。",
+        }
+      : undefined;
+  }
 
-    let state = "unknown";
-    for (let i = 0; i < 15; i++) {
-      const row = (await this.adbDevices()).find((r) => r.serial === addr);
-      if (row) {
-        state = row.state;
-        if (state === "device" || state === "unauthorized") break;
+  /** 扫描时顺带发现 IPv6 链路本地可达的 adbd，作为独立候选列出来。 */
+  async ipv6Targets(ports: number[]): Promise<WirelessTarget[]> {
+    const neighbors = await linkLocalNeighbors();
+    if (neighbors.length === 0) return [];
+    const jobs: Array<Promise<WirelessTarget | undefined>> = [];
+    for (const n of neighbors) {
+      for (const port of ports) {
+        jobs.push(
+          probeAdb6(n.addr, n.zone, port, 1200).then((kind) =>
+            kind === "none"
+              ? undefined
+              : {
+                  ip: `[${n.addr}%${n.zone}]`,
+                  port,
+                  kind: "scan" as const,
+                  name: "IPv6 直连",
+                  protocol: kind === "tls" ? ("tls" as const) : ("adbd" as const),
+                  ready: kind === "adbd",
+                  via6: true,
+                },
+          ),
+        );
       }
-      await sleep(400);
+    }
+    const out = await Promise.all(jobs);
+    return out.filter((t): t is WirelessTarget => t !== undefined);
+  }
+
+  /** 连接并等状态落定 —— `adb connect` 说 connected 不代表能用。 */
+  async #connectPlain(ip: string, port: number): Promise<ConnectResult> {
+    const addr = `${ip}:${port}`;
+    const isV6 = ip.startsWith("[");
+    // 跨 VLAN 时 `adb connect` 会硬等十几秒：网关只代答 SYN、实际数据全丢。
+    // 先花 1 秒看协议指纹，确认「端口通但不发 ADB 数据」就直接给结论，别让用户干等。
+    const crossSubnet = !isV6 && !this.networks().some((n) => {
+      const [base, bitsRaw] = n.cidr.split("/");
+      return base && inSameSubnet(ip, base, Number(bitsRaw ?? 24));
+    });
+    if (crossSubnet) {
+      const pre = await this.#probeAdb(ip, port, 1000);
+      if (pre.open && pre.protocol !== "adbd" && pre.protocol !== "tls") {
+        return {
+          ok: false,
+          addr,
+          state: "offline",
+          message: "端口通了但网关不放 ADB 数据（跨 VLAN 隔离）",
+          hint: await this.#diagHint(ip, port, isV6),
+        };
+      }
+    }
+    // adb server 里残留的 offline transport 会顶住新连接：连多少次都是 offline。
+    // 每台设备都先清一次，失败再清一次重试 —— 这是跨网段设备最常见的坑。
+    const drop = (): Promise<unknown> => this.raw(["disconnect", addr], 5_000).catch(() => "");
+    await drop();
+
+    let out = "";
+    let state = "unknown";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      state = "unknown";
+      try {
+        out = await this.raw(["connect", addr], 15_000);
+      } catch (e) {
+        out = e instanceof Error ? e.message : String(e);
+      }
+      const lower = out.toLowerCase();
+      if (lower.includes("failed to authenticate")) {
+        return {
+          ok: false,
+          addr,
+          state: "unauthorized",
+          message: "手机拒绝了这台电脑的密钥",
+          hint: "手机 → 开发者选项 → 撤销 USB 调试授权；或在「无线调试 → 已配对设备」里删掉本机，再重新配对。",
+        };
+      }
+      if (lower.includes("cannot connect") || lower.includes("failed to connect")) {
+        if (attempt === 0) {
+          await drop();
+          await sleep(600);
+          continue;
+        }
+        return {
+          ok: false,
+          addr,
+          state: "closed",
+          message: out.split("\n")[0] ?? "连接失败",
+          hint: await this.#diagHint(ip, port, isV6),
+        };
+      }
+
+      for (let i = 0; i < 15; i++) {
+        const row = (await this.adbDevices()).find((r) => r.serial === addr);
+        if (row) {
+          state = row.state;
+          if (state === "device" || state === "unauthorized") break;
+        }
+        await sleep(400);
+      }
+
+      if (state === "device") return { ok: true, addr, state, message: "已连接" };
+      if (state === "unauthorized") {
+        return {
+          ok: false,
+          addr,
+          state,
+          message: "连上了但未授权",
+          hint: "看手机屏幕，弹出「允许 USB 调试吗」时勾选「一律允许」再点确定。",
+        };
+      }
+      if (state === "offline" && attempt === 0) {
+        await drop();
+        await sleep(600);
+        continue;
+      }
+      break;
     }
 
-    if (state === "device") return { ok: true, addr, state, message: "已连接" };
-    if (state === "unauthorized") {
+    if (state === "offline") {
       return {
         ok: false,
         addr,
         state,
-        message: "连上了但未授权",
-        hint: "看手机屏幕，弹出「允许 USB 调试吗」时勾选「一律允许」再点确定。",
+        message: "端口通了但握手完成不了（offline）",
+        hint: await this.#diagHint(ip, port, isV6),
       };
-    }
-    if (state === "offline") {
-      const diag = await this.diagnose(ip, port);
-      return { ok: false, addr, state, message: "端口通了但握手完成不了（offline）", hint: diag.hint };
     }
     return {
       ok: false,
@@ -765,6 +1083,18 @@ export class AdbTools {
   }
 
   async diagnose(ip: string, port: number): Promise<DiagnoseResult> {
+    // IPv6 链路本地地址不能按 IPv4 网段算，也没必要再探一次：列表里就是探活过的。
+    if (ip.startsWith("[")) {
+      return {
+        ip,
+        port,
+        portOpen: true,
+        protocol: "adbd",
+        sameSubnet: true,
+        verdict: "IPv6 链路本地直连，不经三层网关",
+        hint: "这条通道能绕过 VLAN 隔离；地址随手机 WiFi 重连变化，重新扫描即可。",
+      };
+    }
     const [probe, nets] = await Promise.all([this.#probeAdb(ip, port, 1500), Promise.resolve(this.networks())]);
     const target = ipToInt(ip);
     let sameSubnet = false;
@@ -801,13 +1131,13 @@ export class AdbTools {
         verdict = "端口能握手，但对方不发 ADB 数据";
         hint = sameSubnet
           ? "同网段却收不到 ADB 回包，多半是手机侧 adbd 没在监听：插一次 USB 用「转为无线」，或在手机上重新打开「无线调试」。"
-          : "典型的网关假响应：手机和电脑跨了子网，三层设备替你回了 TCP 握手。让手机连电脑开的热点，或换到同一台路由器下。";
+          : "这是网络隔离：学校/宿舍路由器常把手机和电脑分到不同 VLAN，哪怕连的是同一个 WiFi，网关也只代答 TCP 握手、不放实际数据，所以 ping 通、端口通、adb 却一直 offline。程序会自动改走 IPv6 链路本地直连；如果仍失败，说明两块 WiFi 网卡不在同一广播域。";
         break;
       default:
         verdict = "端口不通";
         hint = sameSubnet
           ? "同网段也连不上：手机没开无线调试，或 adbd 没在监听这个端口。插 USB 执行一次「转为无线」，或让手机重新打开无线调试。"
-          : "不在同一网段，跨子网被拦。让手机连电脑开的热点（192.168.137.x），或换到同一台路由器下。";
+          : "不在同一网段，跨子网被拦。程序会自动尝试 IPv6 链路本地直连；不行再检查手机和电脑是不是连的同一个 WiFi。";
     }
     return { ip, port, portOpen: probe.open, protocol: probe.protocol, sameSubnet, localAddress, verdict, hint };
   }
@@ -833,23 +1163,31 @@ export class AdbTools {
         addr,
         state: "no-ip",
         message: "手机没连 Wi-Fi",
-        hint: "先让手机连上 Wi-Fi（建议连电脑开的热点），再执行一次。",
+        hint: "先让手机连上 Wi-Fi 再执行一次。",
       };
     }
     // 必须逐张网卡比对：电脑常同时挂着以太网 / 校园网 / 热点，
     // 只看第一张物理网卡会把「手机其实在热点网段」误判成跨网段。
     // 热点网卡通常叫「本地连接* N」，名字里根本没有 wlan，不能按名字找。
-    const hit = nets.find((n) => inSameSubnet(ip, n.address, prefixOf(undefined, n.cidr)));
-    if (!hit) {
-      const others = nets.filter((n) => !n.virtual).map((n) => `${n.name} ${n.address}`).join("、");
+    // 必须先按网段判断再决定要不要切：tcpip 会把 adbd 从 USB 切到 TCP，
+    // 一旦切过去又连不上，手机就彻底失联了（只能拔线重来）。
+    const sameNet = nets.find((n) => inSameSubnet(ip, n.address, prefixOf(undefined, n.cidr)));
+    if (!sameNet) {
+      const same16 = nets.some((n) => inSameSubnet(ip, n.address, 16));
+      const mine = nets.filter((n) => !n.virtual).map((n) => `${n.name} ${n.address}`).join("、") || "无";
       return {
         ok: false,
         addr: `${ip}:${port}`,
         state: "cross-subnet",
-        message: `手机 IP ${ip} 不在电脑任何网段内（本机: ${others || "无可用网卡"}）`,
-        hint: "让手机连电脑开的热点，拿到同网段地址再试。若手机确实在热点上，先关掉手机上的 VPN / 私有 DNS，再重新连一次热点。",
+        message: same16
+          ? `手机 ${ip} 和电脑只在同一个 /16，不在同一子网（电脑: ${mine}）`
+          : `手机 ${ip} 和电脑不在一个网段（电脑: ${mine}）`,
+        hint:
+          "跨子网时手机收到 SYN 却不回 ADB 数据 —— 这是三层设备在拦，不是手机的问题。" +
+          "转成无线后程序会自动改走 IPv6 链路本地直连，不需要切网络。",
       };
     }
+
     let out = "";
     try {
       out = await this.raw(["-s", serial, "tcpip", String(port)], 25_000);
@@ -861,7 +1199,10 @@ export class AdbTools {
     }
     await sleep(2500);
     const res = await this.connectChecked(ip, port);
-    return { ...res, message: res.ok ? `已切到无线：${ip}:${port}，现在可以拔线了` : `已切换，但连接失败：${res.message}` };
+    if (res.ok) {
+      return { ...res, message: `已切到无线：${ip}:${port}，现在可以拔线了` };
+    }
+    return { ...res, message: `已切换，但连接失败：${res.message}` };
   }
 
   /** 切回 USB 模式。 */

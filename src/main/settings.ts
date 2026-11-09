@@ -17,7 +17,9 @@ export class SettingsStore {
   async load(defaultLang: Lang): Promise<void> {
     this.#settings = defaultSettings(defaultLang);
     try {
-      const raw: unknown = JSON.parse(await readFile(this.path, "utf8"));
+      // 外部工具可能带 BOM 写入，不剥掉会 JSON.parse 失败，整份设置被当成空的重置
+      const text = (await readFile(this.path, "utf8")).replace(/^\uFEFF/, "");
+      const raw: unknown = JSON.parse(text);
       this.#settings = loadSettings(raw, this.#settings);
       // Settings saved before the first-run picker existed: the user already lives with their language.
       if (raw && typeof raw === "object" && !("languageChosen" in raw)) this.#settings.languageChosen = true;

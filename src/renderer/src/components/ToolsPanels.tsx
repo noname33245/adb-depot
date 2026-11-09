@@ -1,6 +1,23 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { AppEntry, DeviceProps, DeviceStats, FileEntry } from "@shared/types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AppEntry, ContactEntry, DeviceProps, DeviceStats, FileEntry, LocationInfo } from "@shared/types";
+import { wgs84ToGcj02 } from "@shared/coord";
 import { useT } from "../settings";
+
+/** 按水平精度给个说法：GPS 和网络定位差着数量级，得让用户看得出来。 */
+const accLabel = (acc?: number): string => {
+  if (acc === undefined) return "";
+  if (acc <= 20) return "GPS";
+  if (acc <= 60) return "WiFi / 基站";
+  return "粗略";
+};
+
+/** 把「距今多少秒」说成人话。 */
+const fmtAge = (sec: number): string => {
+  if (sec < 60) return "刚刚";
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`;
+  return `${Math.floor(sec / 86400)} 天前`;
+};
 
 const fmtSize = (n: number): string => {
   if (n <= 0) return "—";
@@ -16,8 +33,51 @@ const fmtSize = (n: number): string => {
 
 const fmtTime = (ms: number): string => (ms ? new Date(ms).toLocaleString() : "—");
 
-function Empty({ text }: { text: string }) {
+export function Empty({ text }: { text: string }) {
   return <div className="tool-empty">{text}</div>;
+}
+
+/**
+ * 应用图标：滚到可视区域才去取，取到之前显示包名首字母。
+ *
+ * 主进程用设备上的 unzip 直接从 APK 里解出图标那一张（几 KB），
+ * 不下载整个 APK —— 一个包几十上百 MB，那样纯属自残。
+ */
+function AppIcon({ serial, pkg }: { serial: string; pkg: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [src, setSrc] = useState<string>();
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let cancelled = false;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        io.disconnect();
+        window.farm.apps
+          .icon(serial, pkg)
+          .then((url) => {
+            if (!cancelled && url) setSrc(url);
+          })
+          .catch(() => {
+            // 取不到就算了，保留首字母占位
+          });
+      },
+      { rootMargin: "200px" },
+    );
+    io.observe(el);
+    return () => {
+      cancelled = true;
+      io.disconnect();
+    };
+  }, [serial, pkg]);
+
+  return (
+    <span ref={ref} className="app-icon" title={pkg}>
+      {src ? <img src={src} alt="" loading="lazy" /> : <span className="app-icon-ph">{(pkg.split(".").pop() ?? "?").charAt(0).toUpperCase()}</span>}
+    </span>
+  );
 }
 
 export function AppsPanel({ serial }: { serial?: string }) {
@@ -84,6 +144,7 @@ export function AppsPanel({ serial }: { serial?: string }) {
       <div className="tool-list">
         {shown.map((a) => (
           <div className="tool-row" key={a.packageName}>
+            <AppIcon serial={serial} pkg={a.packageName} />
             <div className="tool-row-main">
               <button
                 className="tool-name tool-link"
@@ -111,6 +172,17 @@ export function AppsPanel({ serial }: { serial?: string }) {
               </button>
               <button className="btn" disabled={busy} onClick={() => void act("清数据", () => window.farm.apps.clearData(serial, a.packageName))}>
                 清数据
+              </button>
+              <button
+                className="btn"
+                disabled={busy}
+                title="把这个应用的安装包拉到电脑"
+                onClick={() => void act("提取 APK", async () => {
+                  const r = await window.farm.apps.extract(serial, a.packageName, a.label);
+                  return r.ok ? `已保存到 ${r.dir}` : r.error || "已取消";
+                })}
+              >
+                取APK
               </button>
               <button
                 className="btn danger"
@@ -155,6 +227,17 @@ export function FilesPanel({ serial }: { serial?: string }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [failed, setFailed] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
+  const dirRef = useRef(dir);
+  dirRef.current = dir;
+  /** 每个目录的滚动位置，返回时还原，不用重新从顶上找。 */
+  const scrollMemo = useRef<Map<string, number>>(new Map());
+  /** 刚加载完要滚到哪（渲染后再执行）。 */
+  const pendingScroll = useRef<number | null>(null);
+  /** 勾选的文件，批量操作用。 */
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  /** 正在填参数的操作：重命名 / 复制 / 移动。 */
+  const [op, setOp] = useState<{ kind: "rename" | "copy" | "move"; value: string }>();
 
   const load = useCallback(
     async (target: string) => {
@@ -163,7 +246,10 @@ export function FilesPanel({ serial }: { serial?: string }) {
       try {
         // 先取到结果再切目录，避免读失败后路径和内容对不上
         const list = await window.farm.files.list(serial, target);
+        // 进哪个目录就恢复哪个目录的滚动位置
+        pendingScroll.current = scrollMemo.current.get(target) ?? 0;
         setEntries(list);
+        setPicked(new Set());
         setDir(target);
         setMsg("");
         setFailed(false);
@@ -182,6 +268,16 @@ export function FilesPanel({ serial }: { serial?: string }) {
   useEffect(() => {
     void load("/sdcard");
   }, [load]);
+
+  // 列表渲染完再滚，否则元素还没铺开、scrollTop 设不进去
+  useEffect(() => {
+    if (pendingScroll.current === null) return;
+    const top = pendingScroll.current;
+    pendingScroll.current = null;
+    requestAnimationFrame(() => {
+      if (listRef.current) listRef.current.scrollTop = top;
+    });
+  }, [entries]);
 
   const up = (): void => {
     const parent = dir.replace(/\/[^/]+$/, "") || "/";
@@ -209,6 +305,49 @@ export function FilesPanel({ serial }: { serial?: string }) {
     }
   };
 
+  const baseName = (p: string): string => p.replace(/\/+$/, "").split("/").pop() ?? p;
+
+  const togglePick = (path: string): void =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+
+  /** 把对话框里填的内容落到设备上。 */
+  const runOp = async (): Promise<void> => {
+    if (!serial || !op) return;
+    const list = [...picked];
+    const target = op.value.trim().replace(/\/+$/, "");
+    if (list.length === 0 || !target) return;
+    setOp(undefined);
+    setBusy(true);
+    let done = 0;
+    let fail = 0;
+    try {
+      for (const from of list) {
+        try {
+          if (op.kind === "rename") await window.farm.files.rename(serial, from, `${dir}/${target}`);
+          else {
+            const dest = `${target}/${baseName(from)}`;
+            if (op.kind === "move") await window.farm.files.rename(serial, from, dest);
+            else await window.farm.files.copy(serial, from, dest);
+          }
+          done++;
+        } catch {
+          fail++;
+        }
+      }
+      setMsg(`${op.kind === "rename" ? "重命名" : op.kind === "move" ? "移动" : "复制"} ${done} 项${fail ? `，${fail} 项失败` : ""}`);
+      setFailed(fail > 0);
+      setPicked(new Set());
+      await load(dir);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!serial) return <Empty text="先在左侧选择一台设备" />;
 
   return (
@@ -225,6 +364,25 @@ export function FilesPanel({ serial }: { serial?: string }) {
           上传
         </button>
       </div>
+      {picked.size > 0 && (
+        <div className="tool-bar file-ops">
+          <span className="tool-hint">已选 {picked.size} 项</span>
+          {picked.size === 1 && (
+            <button className="btn" disabled={busy} onClick={() => setOp({ kind: "rename", value: "" })}>
+              重命名
+            </button>
+          )}
+          <button className="btn" disabled={busy} onClick={() => setOp({ kind: "move", value: dir })}>
+            移动到
+          </button>
+          <button className="btn" disabled={busy} onClick={() => setOp({ kind: "copy", value: dir })}>
+            复制到
+          </button>
+          <button className="btn" onClick={() => setPicked(new Set())}>
+            取消
+          </button>
+        </div>
+      )}
       <div className="file-jumps">
         {SHORTCUTS.map(([label, path]) => (
           <button key={path} className={`file-jump${dir === path ? " active" : ""}`} onClick={() => void load(path)} disabled={busy}>
@@ -235,12 +393,50 @@ export function FilesPanel({ serial }: { serial?: string }) {
       <div className={`tool-hint${failed ? " tool-error" : ""}`}>
         {failed ? msg : `${entries.length} 项${msg ? ` · ${msg}` : ""}`}
       </div>
-      <div className="tool-list">
+      {op && (
+        <div className="op-dialog">
+          <div className="op-title">
+            {op.kind === "rename" ? `重命名「${baseName([...picked][0] ?? "")}」` : op.kind === "move" ? "移动到目录" : "复制到目录"}
+          </div>
+          <input
+            className="input"
+            autoFocus
+            value={op.value}
+            placeholder={op.kind === "rename" ? "新文件名" : "/sdcard/目标目录"}
+            onChange={(e) => setOp({ ...op, value: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void runOp();
+              if (e.key === "Escape") setOp(undefined);
+            }}
+          />
+          <div className="op-actions">
+            <button className="btn primary" onClick={() => void runOp()}>
+              确定
+            </button>
+            <button className="btn" onClick={() => setOp(undefined)}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div
+        className="tool-list"
+        ref={listRef}
+        onScroll={(e) => scrollMemo.current.set(dirRef.current, e.currentTarget.scrollTop)}
+      >
         {entries.length === 0 && !failed && <div className="tool-empty">这个目录是空的</div>}
         {entries.map((f) => {
           const canEnter = f.isDir || Boolean(f.link?.startsWith("/"));
           return (
-            <div className="tool-row" key={f.path}>
+            <div className={`tool-row${picked.has(f.path) ? " picked" : ""}`} key={f.path}>
+              <input
+                type="checkbox"
+                className="file-check"
+                checked={picked.has(f.path)}
+                onChange={() => togglePick(f.path)}
+                title="勾选后可批量操作"
+              />
               <button className="tool-row-main tool-link" onClick={() => enter(f)} disabled={!canEnter} title={f.link ? `${f.path} → ${f.link}` : f.path}>
                 <span className="tool-name">
                   {canEnter ? "▸ " : ""}
@@ -275,6 +471,53 @@ export function DevicePanel({ serial, deviceIp, onOpenConnection }: { serial?: s
   const [stats, setStats] = useState<DeviceStats | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+
+  const [contacts, setContacts] = useState<ContactEntry[]>([]);
+  const [contactBusy, setContactBusy] = useState(false);
+  const [contactQ, setContactQ] = useState("");
+  const [contactMsg, setContactMsg] = useState("");
+
+  const loadContacts = useCallback(async () => {
+    if (!serial) return;
+    setContactBusy(true);
+    setContactMsg("");
+    try {
+      const list = await window.farm.contacts.list(serial);
+      setContacts(list);
+      if (list.length === 0) setContactMsg("手机通讯录是空的，或者系统不允许读取");
+    } catch (e) {
+      setContactMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setContactBusy(false);
+    }
+  }, [serial]);
+
+  const shownContacts = useMemo(() => {
+    const q = contactQ.trim().toLowerCase();
+    if (!q) return contacts;
+    return contacts.filter((c) => c.name.toLowerCase().includes(q) || c.number.includes(q));
+  }, [contacts, contactQ]);
+
+  const [loc, setLoc] = useState<LocationInfo | null>(null);
+  const [locBusy, setLocBusy] = useState(false);
+  const [locMsg, setLocMsg] = useState("");
+
+  const readLoc = useCallback(async () => {
+    if (!serial) return;
+    setLocBusy(true);
+    try {
+      setLoc(await window.farm.gps.get(serial));
+      setLocMsg("");
+    } catch (e) {
+      setLocMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLocBusy(false);
+    }
+  }, [serial]);
+
+  useEffect(() => {
+    void readLoc();
+  }, [readLoc]);
 
   const refresh = useCallback(async () => {
     if (!serial) return;
@@ -353,6 +596,139 @@ export function DevicePanel({ serial, deviceIp, onOpenConnection }: { serial?: s
             <span className="tool-kv-value">{v ?? "—"}</span>
           </div>
         ))}
+      </div>
+
+      <div className="geo-card">
+        <div className="geo-head">
+          <span className="geo-title">定位</span>
+          <button className="btn" disabled={locBusy} onClick={() => void readLoc()}>
+            {locBusy ? "读取中…" : "读取定位"}
+          </button>
+        </div>
+
+        {locMsg && <p className="hint error">{locMsg}</p>}
+
+        {loc && !loc.enabled && (
+          <>
+            <p className="hint">手机定位总开关是关闭的，读不到任何位置。</p>
+            <div className="geo-actions">
+              <button
+                className="btn"
+                onClick={() =>
+                  void window.farm.batch
+                    .shell([serial], "settings put secure location_mode 3")
+                    .then(() => readLoc())
+                }
+              >
+                打开手机定位
+              </button>
+            </div>
+          </>
+        )}
+
+        {loc && loc.enabled && !loc.fix && (
+          <p className="hint">
+            手机最近没有定位记录。系统只在有应用请求定位时才更新缓存，本工具只在后台读取、不会打开任何软件；
+            需要时自己先打开一次地图，再回来读。
+          </p>
+        )}
+
+        {loc?.fix && (() => {
+          const gcj = wgs84ToGcj02(loc.fix.lat, loc.fix.lon);
+          const lon = gcj.lon.toFixed(6);
+          const lat = gcj.lat.toFixed(6);
+          const copy = (text: string): void => {
+            void window.farm.clipboard.write(text);
+          };
+          return (
+            <>
+              <div className="geo-pair">
+                <div className="geo-cell">
+                  <span className="geo-label">经度 E</span>
+                  <span className="geo-num">{lon}</span>
+                </div>
+                <div className="geo-cell">
+                  <span className="geo-label">纬度 N</span>
+                  <span className="geo-num">{lat}</span>
+                </div>
+              </div>
+              <div className="tool-sub">
+                GCJ-02（高德 / 腾讯） · 原始 WGS84：{loc.fix.lon.toFixed(6)}, {loc.fix.lat.toFixed(6)}（经度, 纬度）
+              </div>
+              <div className="tool-sub">
+                {loc.fix.provider}
+                {loc.fix.accuracy !== undefined
+                  ? ` · ${Math.round(loc.fix.accuracy)} m（${accLabel(loc.fix.accuracy)}）`
+                  : ""}
+                {loc.fix.ageSeconds !== undefined ? ` · ${fmtAge(loc.fix.ageSeconds)}` : ""}
+              </div>
+              <div className="geo-actions">
+                <button className="btn" onClick={() => copy(lon)}>
+                  复制经度
+                </button>
+                <button className="btn" onClick={() => copy(lat)}>
+                  复制纬度
+                </button>
+                <button className="btn" onClick={() => copy(`${lon}, ${lat}`)}>
+                  复制一对
+                </button>
+                <button
+                  className="btn"
+                  onClick={() =>
+                    void window.farm.batch.shell(
+                      [serial],
+                      `am start -a android.intent.action.VIEW -d "geo:${gcj.lat},${gcj.lon}?q=${gcj.lat},${gcj.lon}"`,
+                    )
+                  }
+                >
+                  手机地图打开
+                </button>
+              </div>
+            </>
+          );
+        })()}
+      </div>
+
+      <div className="geo-card">
+        <div className="geo-head">
+          <span className="geo-title">通讯录</span>
+          <button className="btn" disabled={contactBusy} onClick={() => void loadContacts()}>
+            {contactBusy ? "读取中…" : "读取通讯录"}
+          </button>
+        </div>
+
+        {contactMsg && <p className="hint">{contactMsg}</p>}
+
+        {contacts.length > 0 && (
+          <>
+            <input
+              className="input"
+              placeholder="搜索姓名或号码"
+              value={contactQ}
+              onChange={(e) => setContactQ(e.target.value)}
+            />
+            <div className="tool-hint">
+              {shownContacts.length} / {contacts.length} 条
+            </div>
+            <div className="contact-list">
+              {shownContacts.map((c) => (
+                <div className="contact-row" key={`${c.name}|${c.number}`}>
+                  <span className="contact-name" title={c.name}>
+                    {c.name}
+                  </span>
+                  <span className="contact-num">{c.number}</span>
+                  <button
+                    className="btn tiny"
+                    onClick={() => void window.farm.clipboard.write(c.number)}
+                    title="复制号码"
+                  >
+                    {c.type || "复制"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -6,12 +6,13 @@ export const STREAM_FPS: readonly number[] = [15, 24, 30, 45, 60];
 const ADB_NAME_RE = /(^|[\\/])adb(\.exe)?$/i;
 export const DEFAULT_TEST_URL = "http://httpbin.org/ip";
 
-export const DEFAULT_STREAM: StreamSettings = { maxSize: 720, bitRate: 2, maxFps: 30, stayAwake: true };
+export const DEFAULT_STREAM: StreamSettings = { maxSize: 480, bitRate: 2, maxFps: 30, stayAwake: true };
 
 export function defaultSettings(language: Lang): AppSettings {
   return {
     language,
     languageChosen: false,
+    theme: "dark",
     confirmDanger: true,
     stream: { ...DEFAULT_STREAM },
     proxyTestUrl: DEFAULT_TEST_URL,
@@ -20,8 +21,10 @@ export function defaultSettings(language: Lang): AppSettings {
     closeToTray: true,
     minimizeToTray: false,
     autoLaunch: false,
-    startMinimized: false,
     cacheAutoClean: true,
+    transferSlots: 4,
+    transferLimitKbps: 2048,
+    linkMode: "video",
     cacheDays: 7,
     syncClipboard: true,
   };
@@ -66,6 +69,10 @@ export function mergeSettings(base: AppSettings, patch: unknown): AppSettings {
     next.language = p.language;
   }
   if (p.languageChosen !== undefined) next.languageChosen = bool(p.languageChosen, "languageChosen");
+  if (p.theme !== undefined) {
+    if (p.theme !== "dark" && p.theme !== "light" && p.theme !== "system") bad("theme");
+    next.theme = p.theme;
+  }
   if (p.confirmDanger !== undefined) next.confirmDanger = bool(p.confirmDanger, "confirmDanger");
   if (p.stream !== undefined) {
     if (!p.stream || typeof p.stream !== "object") bad("stream");
@@ -92,7 +99,12 @@ export function mergeSettings(base: AppSettings, patch: unknown): AppSettings {
   if (p.closeToTray !== undefined) next.closeToTray = bool(p.closeToTray, "closeToTray");
   if (p.minimizeToTray !== undefined) next.minimizeToTray = bool(p.minimizeToTray, "minimizeToTray");
   if (p.autoLaunch !== undefined) next.autoLaunch = bool(p.autoLaunch, "autoLaunch");
-  if (p.startMinimized !== undefined) next.startMinimized = bool(p.startMinimized, "startMinimized");
+  if (p.transferSlots !== undefined) next.transferSlots = range(p.transferSlots, 1, 12, "transferSlots");
+  // 旧的「均衡」统一归到视频优先，只保留两档
+  if (p.linkMode === "video" || p.linkMode === "files") next.linkMode = p.linkMode;
+  else if (p.linkMode === "balanced") next.linkMode = "video";
+  if (p.transferLimitKbps !== undefined)
+    next.transferLimitKbps = range(p.transferLimitKbps, 0, 102_400, "transferLimitKbps");
   if (p.cacheAutoClean !== undefined) next.cacheAutoClean = bool(p.cacheAutoClean, "cacheAutoClean");
   if (p.cacheDays !== undefined) next.cacheDays = Math.round(range(p.cacheDays, 0, 365, "cacheDays"));
   if (p.syncClipboard !== undefined) next.syncClipboard = bool(p.syncClipboard, "syncClipboard");

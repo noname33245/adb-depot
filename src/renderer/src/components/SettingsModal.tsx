@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { LANG_NAMES, LANGS, type Lang } from "@shared/i18n";
 import { DEFAULT_TEST_URL, STREAM_FPS, STREAM_SIZES } from "@shared/settings";
-import type { AppInfo, AppSettings, ProxyState, StreamSettings } from "@shared/types";
+import type { AppInfo, AppSettings, ProxyState, StreamSettings, ThemeMode } from "@shared/types";
 import { errorText } from "../errors";
 import { useSettings, useT } from "../settings";
 
@@ -131,6 +131,20 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             </label>
           </Group>
 
+          <Group title="外观" hint="「跟随 Windows」会随系统深色模式自动切换；固定深/浅色则不受系统影响。">
+            <Row label="界面主题">
+              <select
+                className="input"
+                value={settings.theme}
+                onChange={(e) => set({ theme: e.target.value as ThemeMode })}
+              >
+                <option value="dark">深色</option>
+                <option value="light">浅色</option>
+                <option value="system">跟随 Windows</option>
+              </select>
+            </Row>
+          </Group>
+
           <Group title={t("set.tray")} hint={t("set.trayHint")}>
             <label className="check">
               <input type="checkbox" checked={settings.closeToTray} onChange={(e) => set({ closeToTray: e.target.checked })} />
@@ -141,13 +155,23 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               {t("set.minimizeToTray")}
             </label>
             <label className="check">
-              <input type="checkbox" checked={settings.startMinimized} onChange={(e) => set({ startMinimized: e.target.checked })} />
-              {t("set.startMinimized")}
-            </label>
-            <label className="check">
               <input type="checkbox" checked={settings.autoLaunch} onChange={(e) => set({ autoLaunch: e.target.checked })} />
               {t("set.autoLaunch")}
             </label>
+            <p className="hint">{t("set.autoLaunchHint")}</p>
+          </Group>
+
+          <Group title="传输" hint="相册缩略图、应用图标同时取几路。数值越大越快，但会挤占投屏带宽">
+            <Row label="并发路数" hint={`${settings.transferSlots} 路（1–12）`}>
+              <input
+                type="range"
+                min={1}
+                max={12}
+                step={1}
+                value={settings.transferSlots}
+                onChange={(e) => set({ transferSlots: Number(e.target.value) })}
+              />
+            </Row>
           </Group>
 
           <Group title={t("set.cache")} hint={t("set.cacheHint")}>

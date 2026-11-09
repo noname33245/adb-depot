@@ -27,6 +27,12 @@ export function shellCommand(...args: string[]): string {
 export class DeviceManager {
   readonly client = new AdbServerClient(new AdbServerNodeTcpConnector({ host: "127.0.0.1", port: 5037 }));
   #adbs = new Map<string, Promise<Adb>>();
+  /**
+   * 文件传输专用的第二条 adb 连接。
+   * 投屏、控制指令走 #adbs；相册读图、图标、下载走这里，
+   * 一条连接被大图占满时，视频包和控制指令不至于跟着一起卡住。
+   */
+  #transferAdbs = new Map<string, Promise<Adb>>();
   #devices = new Map<string, DeviceInfo>();
   #observer: AdbServerClient.DeviceObserver | undefined;
   #listeners = new Set<(devices: DeviceInfo[]) => void>();
@@ -87,10 +93,11 @@ export class DeviceManager {
     clearTimeout(this.#retry);
     this.#retry = undefined;
     await this.#observer?.stop();
-    for (const adb of this.#adbs.values()) {
+    for (const adb of [...this.#adbs.values(), ...this.#transferAdbs.values()]) {
       adb.then((a) => a.close()).catch(() => {});
     }
     this.#adbs.clear();
+    this.#transferAdbs.clear();
   }
 
   onChange(listener: (devices: DeviceInfo[]) => void): () => void {
@@ -155,6 +162,14 @@ export class DeviceManager {
     const adb = this.#adbs.get(serial);
     this.#adbs.delete(serial);
     adb?.then((a) => a.close()).catch(() => {});
+    const transfer = this.#transferAdbs.get(serial);
+    this.#transferAdbs.delete(serial);
+    transfer?.then((a) => a.close()).catch(() => {});
+  }
+
+  /** 丢掉缓存的 adb 实例，下次 getAdb 会重建（连接卡死时用）。 */
+  resetConnection(serial: string): void {
+    this.#dropAdb(serial);
   }
 
   getAdb(serial: string): Promise<Adb> {
@@ -165,6 +180,25 @@ export class DeviceManager {
       adb.then(
         (a) => a.disconnected.then(() => this.#adbs.get(serial) === adb && this.#adbs.delete(serial)),
         () => this.#adbs.delete(serial),
+      );
+    }
+    return adb;
+  }
+
+  /**
+   * 文件传输专用连接。与 getAdb 完全独立：adb server 会为它再开一条 transport，
+   * 大文件把这条堵住时，投屏和控制那条仍然能收发。
+   */
+  getTransferAdb(serial: string): Promise<Adb> {
+    let adb = this.#transferAdbs.get(serial);
+    if (!adb) {
+      adb = this.client.createAdb({ serial });
+      this.#transferAdbs.set(serial, adb);
+      adb.then(
+        (a) => a.disconnected.then(() => {
+          if (this.#transferAdbs.get(serial) === adb) this.#transferAdbs.delete(serial);
+        }),
+        () => this.#transferAdbs.delete(serial),
       );
     }
     return adb;
