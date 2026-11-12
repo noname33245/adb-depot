@@ -1789,3 +1789,683 @@ body.side-resizing {
 .device-window .tile { max-width: none; }
 .device-window .tile-header { cursor: grab; touch-action: none; user-select: none; }
 .device-window .tile-header:active { cursor: grabbing; }
+
+/* --- 相册 --- */
+
+.tabs {
+  flex: 0 0 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.gallery-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  display: grid;
+  /* 列自适应，行高写死：不能依赖 aspect-ratio + auto 行，
+     否则容器高度受限时行高会塌成 0，几百个格子全叠在一起 */
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  grid-auto-rows: 96px;
+  gap: 6px;
+  padding: 4px 12px 14px;
+  align-content: start;
+}
+
+.gallery-cell {
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--soft);
+  overflow: hidden;
+  cursor: zoom-in;
+  display: grid;
+  place-items: center;
+}
+
+.gallery-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.gallery-cell.ready {
+  border-color: transparent;
+}
+
+.gallery-ph {
+  color: var(--muted);
+  font-size: 16px;
+  opacity: 0.5;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.84);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.lightbox-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 92vw;
+  max-height: 92vh;
+}
+
+.lightbox-body img {
+  max-width: 92vw;
+  max-height: 80vh;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.lightbox-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #ddd;
+}
+
+.lightbox-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 相册工具条：翻页按钮夹着页码，别被 hint 挤散 */
+.gallery-bar {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.gallery-bar .tool-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 应用列表图标 */
+.app-icon {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--soft-2);
+}
+
+.app-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.app-icon-ph {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 定位卡片 */
+.geo-card {
+  margin: 10px 12px 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.geo-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.geo-title {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.geo-coord {
+  font-family: var(--mono, monospace);
+  font-size: 16px;
+  letter-spacing: 0.02em;
+  user-select: text;
+}
+
+.geo-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* 经度 / 纬度 两栏，避免粘错顺序 */
+.geo-pair {
+  display: flex;
+  gap: 10px;
+}
+
+.geo-cell {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--soft);
+}
+
+.geo-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.geo-num {
+  font-family: var(--mono, monospace);
+  font-size: 15px;
+  user-select: text;
+}
+
+/* 通讯录列表 */
+.contact-list {
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.contact-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 5px;
+}
+
+.contact-row:hover {
+  background: var(--soft);
+}
+
+.contact-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.contact-num {
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  color: var(--muted);
+  user-select: text;
+}
+
+.btn.tiny {
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+/* 相册页码跳转 */
+.page-jump {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: center;
+}
+
+.page-input {
+  width: 56px;
+  padding: 3px 6px;
+  text-align: center;
+  font-size: 12px;
+}
+
+/* 数字输入框的上下箭头挤占宽度，去掉 */
+.page-input::-webkit-inner-spin-button,
+.page-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* 大图先用缩略图顶上时会有点糊，轻微柔化过渡一下 */
+.lightbox-body img.soft {
+  filter: blur(0.4px);
+}
+
+/* 相册多选与右键菜单 */
+.gallery-cell.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-color: transparent;
+}
+
+.ctx-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 71;
+  min-width: 140px;
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: 0 8px 24px var(--shadow-2);
+}
+
+.ctx-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  text-align: left;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ctx-item:hover {
+  background: var(--soft-2);
+}
+
+/* 顶栏传输参数：并发 + 限速 */
+.xfer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.xfer select {
+  padding: 3px 4px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* 「点开」占位：说明这张图没有现成缩略图，点击才取原图 */
+.gallery-ph {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+/* 手动添加网段 */
+.conn-net-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.conn-net-add .input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+}
+
+/* 按钮别被输入框挤掉字 */
+.conn-net-add .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  min-width: 46px;
+}
+
+/* 文件多选与批量操作 */
+.file-check {
+  flex: 0 0 auto;
+  margin: 0 2px 0 0;
+}
+
+.tool-row.picked {
+  background: var(--soft-2);
+}
+
+.file-ops {
+  padding: 0 12px;
+  flex-wrap: wrap;
+}
+
+.op-dialog {
+  margin: 0 12px 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.op-title {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.op-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* 相册筛选行 */
+.gallery-filter {
+  padding: 0 12px;
+  gap: 6px;
+}
+
+.gallery-filter select,
+.gallery-filter input {
+  font-size: 12px;
+  padding: 3px 6px;
+  min-width: 0;
+}
+
+.gallery-filter select {
+  max-width: 45%;
+}
+
+/* 实时帧率 / 码率标签 */
+.badge-perf {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  background: var(--soft-2);
+}
+
+/* ---------- 下载队列 ---------- */
+.download-queue {
+  margin: 0 12px 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dq-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dq-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.dq-actions .btn {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.dq-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.dq-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+.dq-now {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 监控面板 ---------- */
+.monitor-panel {
+  gap: 0;
+  overflow-y: auto;
+}
+
+.mon-section {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mon-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+.mon-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mon-head .mon-title {
+  margin-right: auto;
+}
+
+.mon-head .btn {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.mon-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mon-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mon-settings b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.mon-perf {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mon-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 70px 82px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--panel);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mon-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mon-val {
+  text-align: right;
+  color: var(--ok);
+}
+
+.mon-val.dim {
+  color: var(--muted);
+}
+
+.mon-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.mon-notif {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mon-notif-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.mon-notif-body {
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+/* --- 顶栏主题切换 --- */
+
+.theme-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.theme-trigger {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.theme-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 50;
+  width: 220px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 12px 30px var(--shadow-2);
+}
+
+.theme-menu-title {
+  padding: 4px 8px 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.theme-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-option:hover {
+  background: var(--soft);
+}
+
+.theme-option.active {
+  background: var(--soft-2);
+}
+
+.theme-option-icon {
+  width: 18px;
+  flex: 0 0 auto;
+  text-align: center;
+  font-size: 15px;
+  color: var(--accent);
+}
+
+.theme-option-text {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.theme-option-text b {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.theme-option-text small {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.theme-tick {
+  color: var(--accent);
+  font-size: 13px;
+}

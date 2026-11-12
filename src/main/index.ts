@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, session, shell, Tray, type IpcMainEvent, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, session, shell, Tray, type IpcMainEvent, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from "electron";
 import { ReadableStream } from "@yume-chan/stream-extra";
 import { langForLocale, t } from "@shared/i18n";
 import { isInvalidScenario, NAV_KEYS, PACKAGE_RE } from "@shared/scenario";
-import type { CacheCleanResult, DeviceResult, NavKey, ProxyState, TouchEvent } from "@shared/types";
+import type { CacheCleanResult, DeviceResult, NavKey, ProxyState, ThemeMode, ThemeState, TouchEvent } from "@shared/types";
 import { DeviceManager, shellCommand } from "./devices";
 import { cleanCache, measureCache } from "./cache";
 import { ConnHistory } from "./connhistory";
@@ -16,8 +16,16 @@ import { Recorder } from "./recorder";
 import { ScenarioRunner } from "./runner";
 import { ScenarioStore } from "./scenarios";
 import { SettingsStore } from "./settings";
+import { Gallery } from "./gallery";
+import { AppIcons } from "./icons";
+import { TransferGate } from "./transfer";
+import { readLocation } from "./location";
+import { listContacts } from "./contacts";
 import { AdbTools } from "./tools";
 import { Updater } from "./updater";
+import { DownloadQueue } from "./downloads";
+import { NotificationSync, showPhoneNotification } from "./notifications";
+import { ScreenRecordFiles } from "./screenrec";
 
 /**
  * 改名后首次启动：把旧目录「ADB Studio」里的配置搬过来。
@@ -52,11 +60,82 @@ async function migrateUserData(): Promise<void> {
 const settings = new SettingsStore(join(app.getPath("userData"), "settings.json"));
 const devices = new DeviceManager(() => settings.get().adbPath);
 const tools = new AdbTools(() => settings.get().adbPath);
+const gate = new TransferGate(
+  // 专供投屏时把文件并发压低，把带宽让给视频
+  () => {
+    const st = settings.get();
+    // 视频优先：只留 2 路给文件；文件优先：至少 8 路，把链路吃满
+    if (st.linkMode === "video") return 2;
+    return Math.max(8, st.transferSlots);
+  },
+  () => {
+    const st = settings.get();
+    if (st.linkMode === "video") return 512; // 专供投屏：文件只分到 512KB/s
+    if (st.linkMode === "files") return 0; // 专供文件：不限速
+    return st.transferLimitKbps;
+  },
+);
+const gallery = new Gallery(devices, gate);
+const icons = new AppIcons(devices, gate);
 const proxies = new ProxyStore(join(app.getPath("userData"), "proxy-settings.json"));
 const scenarios = new ScenarioStore(join(app.getPath("userData"), "scenarios.json"));
 const connHistory = new ConnHistory(join(app.getPath("userData"), "conn-history.json"));
 const recorder = new Recorder(devices);
+const downloads = new DownloadQueue(tools, (tasks) => win?.webContents.send("downloads:changed", tasks));
+const screenFiles = new ScreenRecordFiles();
+/** 通知同步是否弹系统通知，由界面上的开关决定。 */
+let notifyPopup = true;
+const notifications = new NotificationSync(
+  devices,
+  (items) => win?.webContents.send("notifications:changed", items),
+  (item) => {
+    if (notifyPopup) showPhoneNotification(item);
+  },
+);
 let win: BrowserWindow | undefined;
+
+/** 用户自己点「断开」的地址，十秒内别自动连回来。 */
+const manualDisconnect = new Map<string, number>();
+const MANUAL_MS = 10_000;
+
+function markManual(addr: string): void {
+  manualDisconnect.set(addr, Date.now());
+  setTimeout(() => manualDisconnect.delete(addr), MANUAL_MS);
+}
+
+function isManual(serial: string): boolean {
+  const at = manualDisconnect.get(serial);
+  return at !== undefined && Date.now() - at < MANUAL_MS;
+}
+
+/** 窗口底色跟着主题走，浅色模式下启动不会先闪一下黑。 */
+const THEME_BG = { dark: "#0f1115", light: "#f5f6f8" } as const;
+/** themeSource 被固定成 dark/light 后，shouldUseDarkColors 就不再是系统真实偏好了，自己存一份。 */
+let systemDark = true;
+
+function themeState(): ThemeState {
+  return { mode: settings.get().theme, systemDark };
+}
+
+function resolvedTheme(mode: ThemeMode = settings.get().theme): "dark" | "light" {
+  return mode === "system" ? (systemDark ? "dark" : "light") : mode;
+}
+
+function broadcastTheme(): void {
+  win?.webContents.send("theme:changed", themeState());
+}
+
+/** 同时应用到 Electron 原生 UI（菜单/对话框/标题栏）和渲染层 CSS。 */
+function applyTheme(): void {
+  const mode = settings.get().theme;
+  // 先临时切回 system 读一次系统真实偏好，再按用户选择固定 nativeTheme。
+  nativeTheme.themeSource = "system";
+  systemDark = nativeTheme.shouldUseDarkColors;
+  nativeTheme.themeSource = mode;
+  win?.setBackgroundColor(THEME_BG[resolvedTheme(mode)]);
+  broadcastTheme();
+}
+
 /** 托盘图标：有它在，关窗口只是隐藏，进程继续跑。 */
 let tray: Tray | undefined;
 /** 真正退出（区别于「收进托盘」），关闭事件要靠它放行。 */
@@ -70,15 +149,39 @@ const launchedByAutostart = process.argv.includes(AUTOSTART_FLAG);
 let startHiddenOnce = false;
 const updater = new Updater(() => win);
 
+/** 每台设备最近一段时间的帧数与字节数，用来算实时帧率和码率。 */
+const perf = new Map<string, { frames: number; bytes: number }>();
+
 const mirror = new MirrorManager(
   devices,
   join(app.isPackaged ? process.resourcesPath : app.getAppPath(), "resources", "scrcpy-server"),
   {
-    packet: (serial, packet) => win?.webContents.send("mirror:packet", serial, packet),
+    packet: (serial, packet) => {
+      const st = perf.get(serial) ?? { frames: 0, bytes: 0 };
+      st.frames++;
+      const data = (packet as { data?: Uint8Array }).data;
+      if (data) st.bytes += data.byteLength;
+      perf.set(serial, st);
+      win?.webContents.send("mirror:packet", serial, packet);
+    },
     size: (serial, w, h) => win?.webContents.send("mirror:size", serial, w, h),
-    stopped: (serial, reason) => win?.webContents.send("mirror:stopped", serial, reason),
+    stopped: (serial, reason) => {
+      console.log(`[mirror stopped] ${serial} ${reason}`);
+      win?.webContents.send("mirror:stopped", serial, reason);
+    },
   },
-  () => settings.get().stream,
+  () => {
+    const st = settings.get();
+    // 视频优先：对齐旧脚本的 scrcpy 参数
+    // --max-size=1024 --video-bit-rate=8M --max-fps=60
+    if (st.linkMode !== "video") return st.stream;
+    return {
+      ...st.stream,
+      maxSize: Math.max(1024, st.stream.maxSize),
+      bitRate: Math.max(8, st.stream.bitRate),
+      maxFps: Math.max(60, st.stream.maxFps),
+    };
+  },
   () => settings.get().syncClipboard,
 );
 
@@ -195,7 +298,7 @@ function createWindow(): void {
     minWidth: 960,
     minHeight: 600,
     title: "AdbDepot",
-    backgroundColor: "#0f1115",
+    backgroundColor: THEME_BG[resolvedTheme()],
     // 先不显示：启动时若勾了「驻留托盘」，直接不弹窗口，避免闪一下。
     show: false,
     webPreferences: {
@@ -327,6 +430,46 @@ function applyAutoLaunch(enabled: boolean): void {
   }
 }
 
+// ---------- 链路用途（视频 / 文件） ----------
+
+/**
+ * 停掉视频流后，链路会变空闲，无线调试可能被系统回收。
+ * 每 10 秒发一条 echo（几百字节）把连接钉住。
+ */
+const linkTimers = new Map<string, NodeJS.Timeout>();
+
+function keepAlive(serial: string, on: boolean): void {
+  const old = linkTimers.get(serial);
+  if (old) {
+    clearInterval(old);
+    linkTimers.delete(serial);
+  }
+  if (!on) return;
+  const tick = (): void => {
+    void devices.shell(serial, "echo .", 8000).catch(() => {});
+  };
+  tick();
+  linkTimers.set(serial, setInterval(tick, 10_000));
+}
+
+async function applyLinkMode(mode: "video" | "files"): Promise<void> {
+  await settings.update({ linkMode: mode });
+  const online = devices
+    .list()
+    .filter((d) => d.state === "device" && !d.serial.startsWith("emulator-"))
+    .map((d) => d.serial);
+
+  if (mode === "files") {
+    // 专供文件：停掉视频会话，带宽全让出来；同一条连接靠 echo 保活
+    for (const serial of online) await mirror.stop(serial).catch(() => {});
+    for (const serial of online) keepAlive(serial, true);
+    return;
+  }
+
+  for (const serial of online) keepAlive(serial, false);
+  for (const serial of online) await mirror.start(serial).catch(() => {});
+}
+
 // ---------- 缓存清理 ----------
 
 let cacheTimer: NodeJS.Timeout | undefined;
@@ -384,7 +527,9 @@ function serials(value: unknown): string[] {
 }
 
 function serial(value: unknown): string {
-  if (typeof value !== "string" || !devices.has(value)) throw new Error(t("err.unknownDevice"));
+  // 只校验格式。设备短暂 offline 时列表里会缺席，
+  // 这里跟着抛「未知设备」只会把一次抖动放大成一串连锁报错。
+  if (typeof value !== "string" || !value) throw new Error(t("err.unknownDevice"));
   return value;
 }
 
@@ -409,6 +554,7 @@ function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
 function registerIpc(): void {
   handle("settings:get", () => settings.get());
   handle("settings:update", (patch: unknown) => settings.update(patch));
+  handle("theme:state", () => themeState());
   handle("settings:pickAdb", async () => {
     if (!win) return undefined;
     const filters = process.platform === "win32" ? [{ name: "adb", extensions: ["exe"] }] : [];
@@ -427,6 +573,106 @@ function registerIpc(): void {
   handle("devices:refresh", (s: unknown) => devices.refresh(serial(s)));
 
   // ---- 应用管理 ----
+  handle(
+    "gallery:list",
+    (s: unknown, offset: unknown, limit: unknown, refresh: unknown, opts: unknown) =>
+      gallery.list(
+        serial(s),
+        typeof offset === "number" ? offset : 0,
+        typeof limit === "number" ? limit : undefined,
+        refresh === true,
+        (opts ?? {}) as { dir?: string; q?: string },
+      ),
+  );
+  handle("gallery:dirs", (s: unknown) => gallery.dirs(serial(s)));
+  handle("gallery:download", async (s: unknown, paths: unknown) => {
+    const list = Array.isArray(paths) ? paths.map(String).filter(Boolean) : [];
+    if (!win || list.length === 0) return { dir: "", saved: 0, failed: 0 };
+    const pick = await dialog.showOpenDialog(win, {
+      title: "选择保存位置",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    const dir = pick.filePaths[0];
+    if (pick.canceled || !dir) return { dir: "", saved: 0, failed: 0 };
+
+    let saved = 0;
+    let failed = 0;
+    for (const remote of list) {
+      try {
+        await tools.pullFile(serial(s), remote, dir);
+        saved++;
+      } catch {
+        failed++;
+      }
+    }
+    return { dir, saved, failed };
+  });
+
+  // ---- 下载队列 ----
+  handle("downloads:enqueue", async (s: unknown, paths: unknown) => {
+    const list = Array.isArray(paths) ? paths.map(String).filter(Boolean) : [];
+    if (!win || list.length === 0) return { dir: "", added: 0 };
+    const pick = await dialog.showOpenDialog(win, {
+      title: "选择保存位置",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    const dir = pick.filePaths[0];
+    if (pick.canceled || !dir) return { dir: "", added: 0 };
+    return { dir, added: downloads.enqueue(serial(s), list, dir) };
+  });
+  handle("downloads:list", () => downloads.list());
+  handle("downloads:cancel", (id: unknown) => downloads.cancel(typeof id === "string" ? id : undefined));
+  handle("downloads:clear", () => downloads.clear());
+
+  // ---- 手机通知同步 ----
+  handle("notifications:start", (s: unknown, popup: unknown) => {
+    notifyPopup = popup !== false;
+    notifications.start(serial(s));
+  });
+  handle("notifications:stop", () => notifications.stop());
+  handle("notifications:list", () => notifications.list());
+  handle("notifications:clear", () => notifications.clear());
+  handle("notifications:serial", () => notifications.serial);
+
+  // ---- 屏幕录制（渲染层采集画面，主进程分片写盘） ----
+  handle("screenrec:create", (s: unknown, ext: unknown) =>
+    screenFiles.create(serial(s), ext === "webm" ? "webm" : "mp4"),
+  );
+  handle("screenrec:append", (id: unknown, bytes: unknown) =>
+    screenFiles.append(String(id), ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : new Uint8Array(0)),
+  );
+  handle("screenrec:finish", (id: unknown) => screenFiles.finish(String(id)));
+  handle("screenrec:abort", (id: unknown) => screenFiles.abort(String(id)));
+  handle("screenrec:reveal", (p: unknown) => shell.showItemInFolder(String(p)));
+
+  handle("gallery:cancel", (s: unknown) => gallery.cancel(serial(s)));
+  handle("gallery:thumbs", (s: unknown, paths: unknown) =>
+    gallery.thumbs(serial(s), Array.isArray(paths) ? paths.map(String) : []),
+  );
+  handle("gallery:thumb", (s: unknown, path: unknown, full: unknown) =>
+    gallery.thumb(serial(s), String(path), full === true),
+  );
+  handle("gallery:preview", (s: unknown, path: unknown) => gallery.preview(serial(s), String(path)));
+
+  // 渲染层的 navigator.clipboard 被权限策略挡住了，改由主进程写系统剪贴板
+  handle("clipboard:write", (text: unknown) => {
+    clipboard.writeText(String(text));
+  });
+
+  handle("link:set", (mode: unknown) =>
+    applyLinkMode(mode === "files" ? "files" : "video"),
+  );
+
+  handle("mirror:setPaused", (list: unknown, paused: unknown) => {
+    for (const serial of serials(list)) mirror.setPaused(serial, paused === true);
+  });
+
+  handle("contacts:list", (s: unknown) => listContacts(devices, serial(s)));
+
+  handle("gps:get", (s: unknown) => readLocation(devices, serial(s)));
+
+  handle("apps:icon", (s: unknown, pkg: unknown) => icons.get(serial(s), String(pkg)));
+
   handle("apps:list", (s: unknown) => tools.listApps(serial(s)));
   handle("apps:detail", (s: unknown, pkg: unknown) => tools.appDetail(serial(s), String(pkg)));
   handle("apps:uninstall", (s: unknown, pkg: unknown) => tools.uninstall(serial(s), String(pkg)));
@@ -467,20 +713,55 @@ function registerIpc(): void {
     return out.join("\n");
   });
   handle("files:remove", (s: unknown, target: unknown) => tools.removePath(serial(s), String(target)));
+  // 把已安装应用的 APK 拉到电脑
+  handle("apps:extract", async (s: unknown, pkg: unknown, label: unknown) => {
+    const ser = serial(s);
+    const name = String(pkg);
+    const out = await tools.shell(ser, `pm path ${name}`, 15_000).catch(() => "");
+    const path = /package:(.+)/.exec(out)?.[1]?.trim();
+    if (!path) return { ok: false, error: "这个应用没有可提取的 APK（可能是系统拆分包）" };
+    if (!win) return { ok: false, error: "窗口还没准备好" };
+
+    const pick = await dialog.showOpenDialog(win, {
+      title: `保存 ${String(label || name)} 的 APK`,
+      properties: ["openDirectory", "createDirectory"],
+    });
+    const dir = pick.filePaths[0];
+    if (pick.canceled || !dir) return { ok: false, error: "" };
+    try {
+      await tools.pullFile(ser, path, dir);
+      return { ok: true, dir };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  handle("files:rename", (s: unknown, from: unknown, to: unknown) =>
+    tools.renamePath(serial(s), String(from), String(to)),
+  );
+  handle("files:copy", (s: unknown, from: unknown, to: unknown) =>
+    tools.copyPath(serial(s), String(from), String(to)),
+  );
+
   handle("files:makeDir", (s: unknown, target: unknown) => tools.makeDir(serial(s), String(target)));
   handle("files:scanMedia", (s: unknown, target: unknown) => tools.scanMedia(serial(s), String(target)));
 
   // ---- 无线连接 ----
   handle("wireless:networks", () => tools.networks());
+  handle("wireless:hotspot", () => tools.hotspotInfo());
   handle("wireless:mdns", () => tools.mdnsTargets());
+  handle("wireless:ipv6", (ports: unknown) =>
+    tools.ipv6Targets(Array.isArray(ports) ? ports.filter((p): p is number => typeof p === "number") : [5555]),
+  );
   handle("wireless:scan", async (req: unknown) => {
-    const r = (req ?? {}) as { cidrs?: unknown; ports?: unknown; timeoutMs?: unknown; concurrency?: unknown };
+    const r = (req ?? {}) as { cidrs?: unknown; ports?: unknown; timeoutMs?: unknown; concurrency?: unknown; expandNearby?: unknown };
     return tools.scanWireless(
       {
         cidrs: Array.isArray(r.cidrs) ? r.cidrs.filter((c): c is string => typeof c === "string") : [],
         ports: Array.isArray(r.ports) ? r.ports.filter((p): p is number => typeof p === "number") : [],
         timeoutMs: typeof r.timeoutMs === "number" ? r.timeoutMs : undefined,
         concurrency: typeof r.concurrency === "number" ? r.concurrency : undefined,
+        expandNearby: typeof r.expandNearby === "boolean" ? r.expandNearby : undefined,
       },
       (p) => win?.webContents.send("wireless:progress", p),
     );
@@ -501,8 +782,15 @@ function registerIpc(): void {
     if (res.ok && res.state === "device") void connHistory.add(res.addr);
     return res;
   });
-  handle("wireless:disconnect", (addr: unknown) => tools.disconnect(String(addr)));
-  handle("wireless:disconnectAll", () => tools.disconnectAll());
+  handle("wireless:disconnect", (addr: unknown) => {
+    markManual(String(addr));
+    return tools.disconnect(String(addr));
+  });
+  handle("wireless:disconnectAll", () => {
+    // 用户主动全断：所有在线设备都别自动连回来。
+    for (const d of devices.list()) markManual(d.serial);
+    return tools.disconnectAll();
+  });
   handle("wireless:toTcpip", async (s: unknown, port: unknown) => {
     const res = await tools.toTcpip(serial(s), Number(port) || 5555);
     if (res.ok) void connHistory.add(res.addr);
@@ -521,9 +809,19 @@ function registerIpc(): void {
   // ---- 系统信息 ----
   handle("system:props", (s: unknown) => tools.props(serial(s)));
   handle("system:stats", (s: unknown) => tools.stats(serial(s)));
+  handle("system:ping", async (s: unknown) => {
+    const at = Date.now();
+    await devices.shell(serial(s), "echo .", 8_000);
+    return Date.now() - at;
+  });
 
   handle("mirror:start", async (s: unknown) => {
     try {
+      // 链路专供文件时不建视频流，只把连接钉住
+      if (settings.get().linkMode === "files") {
+        keepAlive(serial(s), true);
+        return { success: true, width: 0, height: 0 };
+      }
       return { success: true, ...(await mirror.start(serial(s))) };
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) };
@@ -582,7 +880,7 @@ function registerIpc(): void {
     if (pick.canceled || !file) return [];
     const bytes = new Uint8Array(await readFile(file));
     return devices.forEach(targets, async (s) => {
-      const adb = await devices.getAdb(s);
+      const adb = await devices.getTransferAdb(s);
       const remote = `/data/local/tmp/farm-${randomUUID()}.apk`;
       const sync = await adb.sync();
       try {
@@ -608,7 +906,7 @@ function registerIpc(): void {
     if (pick.canceled || !dir) return [];
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     return devices.forEach(targets, async (s) => {
-      const adb = await devices.getAdb(s);
+      const adb = await devices.getTransferAdb(s);
       const png = await adb.subprocess.noneProtocol.spawnWait("screencap -p");
       const path = join(dir, `${s.replace(/[^\w.-]/g, "_")}_${stamp}.png`);
       await writeFile(path, png);
@@ -756,6 +1054,8 @@ app.on("second-instance", (_event, argv) => {
 });
 
 app.whenReady().then(async () => {
+  // Windows 上没有 AppUserModelID，系统通知会显示不出来
+  if (process.platform === "win32") app.setAppUserModelId("AdbDepot");
   // Vite HMR needs inline scripts in dev.
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     const csp = DEV_URL
@@ -763,14 +1063,26 @@ app.whenReady().then(async () => {
       : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:";
     callback({ responseHeaders: { ...details.responseHeaders, "Content-Security-Policy": [csp] } });
   });
-  session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+  session.defaultSession.setPermissionRequestHandler((_wc, perm, cb) => {
+    // 只放行剪贴板写入，其余一律拒绝
+    cb(perm === "clipboard-sanitized-write");
+  });
 
   registerIpc();
   await migrateUserData();
   await settings.load(langForLocale(app.getLocale()));
+  applyTheme();
+  nativeTheme.on("updated", () => {
+    // 固定深浅色时 themeSource 本身会触发一次 updated，忽略即可。
+    if (settings.get().theme !== "system") return;
+    systemDark = nativeTheme.shouldUseDarkColors;
+    win?.setBackgroundColor(THEME_BG[systemDark ? "dark" : "light"]);
+    broadcastTheme();
+  });
   await Promise.all([proxies.load(), scenarios.load(), connHistory.load()]);
   scheduleYozhRefresh();
   settings.onChange((next, prev) => {
+    if (next.theme !== prev.theme) applyTheme();
     if (next.cyberyozhRefreshMin !== prev.cyberyozhRefreshMin) scheduleYozhRefresh();
     if (
       next.closeToTray !== prev.closeToTray ||
@@ -783,6 +1095,85 @@ app.whenReady().then(async () => {
   });
 
   let known = new Set<string>();
+  /** 上一轮每台设备的状态，用来判断是不是刚刚掉线。 */
+  const stateMemo = new Map<string, string>();
+
+  // ---------- 掉线自动重连 ----------
+
+  /**
+   * 无线设备掉线后自动慢慢重连。
+   * 校园网 / Wi-Fi 抖动很常见，掉一次就要手动连太烦；
+   * 每 3 秒试一次，连续 3 次不成就放弃，避免无休止重试。
+   */
+  const retryTimers = new Map<string, number>();
+  const retryCount = new Map<string, number>();
+  /** 上一次全量发现的时间，避免多条掉线同时触发扫描。 */
+  let lastDiscover = 0;
+
+  /**
+   * 掉线 / 手机换 IP 后重新发现：把当前能连的明文 adbd 全部连上。
+   *
+   * 这里刻意不做设备身份核对：手上有多台手机、模拟器时，各自按地址连各自的，
+   * 只要不是用户刚主动断开的，连上就留着。宁可多连一台，也不要把设备挡在外面。
+   */
+  async function connectDiscovered(): Promise<boolean> {
+    if (Date.now() - lastDiscover < 15_000) return false;
+    lastDiscover = Date.now();
+    const online = new Set(devices.list().filter((d) => d.state === "device").map((d) => d.serial));
+    const mdns = await tools.mdnsTargets().catch(() => []);
+    const v6 = await tools.ipv6Targets([5555]).catch(() => []);
+    const targets = [...mdns.filter((t) => t.ready && !t.pairing), ...v6];
+    let any = false;
+    for (const t of targets) {
+      const addr = `${t.ip}:${t.port}`;
+      if (online.has(addr) || isManual(addr)) continue;
+      const r = await tools.connectChecked(t.ip, t.port).catch(() => undefined);
+      if (r?.ok) {
+        any = true;
+        console.log(`[discover] 已连接 ${r.addr}`);
+      }
+    }
+    return any;
+  }
+
+  function scheduleReconnect(serial: string): void {
+    if (!serial.includes(":") || retryTimers.has(serial) || isManual(serial)) return;
+    const attempt = (retryCount.get(serial) ?? 0) + 1;
+    if (attempt > 4) {
+      retryCount.delete(serial);
+      console.log(`[reconnect ${serial}] 放弃（已试 ${attempt - 1} 次）`);
+      return;
+    }
+    retryCount.set(serial, attempt);
+
+    const timer = setTimeout(async () => {
+      retryTimers.delete(serial);
+      // 第 1 次按原地址试；再不行就当作「手机换了 IP」，重新发现一遍全部设备。
+      if (attempt >= 2 && (await connectDiscovered().catch(() => false))) {
+        retryCount.delete(serial);
+        return;
+      }
+      try {
+        let ok = false;
+        if (serial.startsWith("[")) {
+          // IPv6 链路本地地址一般跟着 MAC 走，原样重连一次就行。
+          await tools.raw(["connect", serial], 15_000);
+          ok = (await tools.adbDevices()).some((d) => d.serial === serial && d.state === "device");
+        } else {
+          const addr = /^([\d.]+):(\d+)$/.exec(serial);
+          if (!addr) return;
+          ok = (await tools.connectChecked(addr[1]!, Number(addr[2]))).ok;
+        }
+        if (!ok) throw new Error("没连上");
+        console.log(`[reconnect ${serial}] 第 ${attempt} 次成功`);
+        retryCount.delete(serial);
+      } catch {
+        scheduleReconnect(serial);
+      }
+    }, 3000) as unknown as number;
+    retryTimers.set(serial, timer);
+  }
+
   devices.onChange((list) => {
     const now = new Set(list.map((d) => d.serial));
     for (const s of known) {
@@ -790,13 +1181,49 @@ app.whenReady().then(async () => {
       mirror.forgetDevice(s);
       runner.stop([s]);
       if (recorder.serial === s) recorder.cancel();
+      // 手机换 IP / WiFi 抖一下会直接从列表里消失（不是 offline），这种也要找回来。
+      if (!isManual(s)) scheduleReconnect(s);
     }
     known = now;
+
+    for (const d of list) {
+      const prev = stateMemo.get(d.serial);
+      if (prev === "device" && d.state !== "device") scheduleReconnect(d.serial);
+      stateMemo.set(d.serial, d.state);
+    }
+    // 链路专供文件时，新连上的设备也要保活；切走时把定时器清掉
+    if (settings.get().linkMode === "files") {
+      for (const d of list) {
+        if (d.state === "device" && !d.serial.startsWith("emulator-")) keepAlive(d.serial, true);
+      }
+      for (const serial of [...linkTimers.keys()]) {
+        if (!list.some((d) => d.serial === serial && d.state === "device")) keepAlive(serial, false);
+      }
+    }
     win?.webContents.send("devices:changed", list);
   });
   runner.onChange((runs) => win?.webContents.send("scenarios:runs", runs));
   recorder.onStatus((status) => win?.webContents.send("recorder:status", status));
   updater.onStatus((status) => win?.webContents.send("updates:status", status));
+
+  // 上次停在「专用文件」的话，启动后照旧不建流，只保活
+  if (settings.get().linkMode === "files") {
+    const list = devices.list().filter((d) => d.state === "device" && !d.serial.startsWith("emulator-"));
+    for (const d of list) keepAlive(d.serial, true);
+  }
+
+  // 每 2 秒汇总一次，推给界面显示实时帧率 / 码率
+  const perfTimer = setInterval(() => {
+    if (!win || win.isDestroyed()) return;
+    for (const [serial, st] of perf) {
+      win.webContents.send("mirror:stats", serial, {
+        fps: Math.round(st.frames / 2),
+        kbps: Math.round((st.bytes * 8) / 2 / 1000),
+      });
+    }
+    perf.clear();
+  }, 2000);
+  app.on("before-quit", () => clearInterval(perfTimer));
 
   createTray();
   applyAutoLaunch(settings.get().autoLaunch);
@@ -825,6 +1252,8 @@ app.on("before-quit", () => {
   clearInterval(cacheTimer);
   runner.stop();
   recorder.cancel();
+  notifications.stop();
+  void screenFiles.abortAll();
   void mirror.stopAll();
   void devices.stop();
   updater.installOnQuit();

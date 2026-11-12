@@ -778,7 +778,7 @@ export function ConnectionCenter({ onClose }: Props) {
 
             <div className="conn-section-title">
               USB 转无线
-              <span className="conn-section-hint">插一次线，之后可拔线</span>
+              <span className="conn-section-hint">插一次线，会打开 5555 端口，之后可拔线</span>
             </div>
             <div className="conn-inline">
               <select value={usbSerial} onChange={(e) => setUsbSerial(e.target.value)} className="conn-grow">

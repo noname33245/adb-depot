@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
-import type { DeviceInfo, FarmApi, ProxyState, RecordingStatus, RunStatus, ScanProgress, UpdateStatus, VideoPacket } from "@shared/types";
+import type { DeviceInfo, DownloadTask, FarmApi, PhoneNotification, ProxyState, RecordingStatus, RunStatus, ScanProgress, ThemeState, UpdateStatus, VideoPacket } from "@shared/types";
 
 function subscribe<A extends unknown[]>(channel: string, listener: (...args: A) => void): () => void {
   const wrapped = (_e: IpcRendererEvent, ...args: unknown[]) => listener(...(args as A));
@@ -15,6 +15,10 @@ const api: FarmApi = {
     info: () => ipcRenderer.invoke("settings:info"),
     openDataDir: () => ipcRenderer.invoke("settings:openDataDir"),
   },
+  theme: {
+    state: () => ipcRenderer.invoke("theme:state"),
+    onChange: (listener) => subscribe<[ThemeState]>("theme:changed", listener),
+  },
   cache: {
     stat: () => ipcRenderer.invoke("cache:stat"),
     clean: () => ipcRenderer.invoke("cache:clean"),
@@ -24,11 +28,16 @@ const api: FarmApi = {
     refresh: (serial) => ipcRenderer.invoke("devices:refresh", serial),
     onChange: (listener) => subscribe<[DeviceInfo[]]>("devices:changed", listener),
   },
+  link: {
+    set: (mode) => ipcRenderer.invoke("link:set", mode),
+  },
   mirror: {
     start: (serial) => ipcRenderer.invoke("mirror:start", serial),
     stop: (serial) => ipcRenderer.invoke("mirror:stop", serial),
+    setPaused: (serials, paused) => ipcRenderer.invoke("mirror:setPaused", serials, paused),
     onPacket: (listener) => subscribe<[string, VideoPacket]>("mirror:packet", listener),
     onSize: (listener) => subscribe<[string, number, number]>("mirror:size", listener),
+    onStats: (listener) => subscribe("mirror:stats", listener),
     onStopped: (listener) => subscribe<[string, string]>("mirror:stopped", listener),
   },
   control: {
@@ -47,7 +56,28 @@ const api: FarmApi = {
     reboot: (serials) => ipcRenderer.invoke("batch:reboot", serials),
     wake: (serials) => ipcRenderer.invoke("batch:wake", serials),
   },
+  clipboard: {
+    write: (text) => ipcRenderer.invoke("clipboard:write", text),
+  },
+  contacts: {
+    list: (serial) => ipcRenderer.invoke("contacts:list", serial),
+  },
+  gps: {
+    get: (serial) => ipcRenderer.invoke("gps:get", serial),
+  },
+  gallery: {
+    list: (serial, offset, limit, refresh, opts) =>
+      ipcRenderer.invoke("gallery:list", serial, offset, limit, refresh, opts),
+    dirs: (serial) => ipcRenderer.invoke("gallery:dirs", serial),
+    download: (serial, paths) => ipcRenderer.invoke("gallery:download", serial, paths),
+    cancel: (serial) => ipcRenderer.invoke("gallery:cancel", serial),
+    thumbs: (serial, paths) => ipcRenderer.invoke("gallery:thumbs", serial, paths),
+    thumb: (serial, path, full) => ipcRenderer.invoke("gallery:thumb", serial, path, full),
+    preview: (serial, path) => ipcRenderer.invoke("gallery:preview", serial, path),
+  },
   apps: {
+    icon: (serial, pkg) => ipcRenderer.invoke("apps:icon", serial, pkg),
+    extract: (serial, pkg, label) => ipcRenderer.invoke("apps:extract", serial, pkg, label),
     list: (serial) => ipcRenderer.invoke("apps:list", serial),
     detail: (serial, pkg) => ipcRenderer.invoke("apps:detail", serial, pkg),
     uninstall: (serial, pkg) => ipcRenderer.invoke("apps:uninstall", serial, pkg),
@@ -62,12 +92,16 @@ const api: FarmApi = {
     pull: (serial, remote) => ipcRenderer.invoke("files:pull", serial, remote),
     push: (serial, remoteDir) => ipcRenderer.invoke("files:push", serial, remoteDir),
     remove: (serial, target) => ipcRenderer.invoke("files:remove", serial, target),
+    rename: (serial, from, to) => ipcRenderer.invoke("files:rename", serial, from, to),
+    copy: (serial, from, to) => ipcRenderer.invoke("files:copy", serial, from, to),
     makeDir: (serial, target) => ipcRenderer.invoke("files:makeDir", serial, target),
     scanMedia: (serial, target) => ipcRenderer.invoke("files:scanMedia", serial, target),
   },
   wireless: {
     networks: () => ipcRenderer.invoke("wireless:networks"),
+    hotspot: () => ipcRenderer.invoke("wireless:hotspot"),
     mdns: () => ipcRenderer.invoke("wireless:mdns"),
+    ipv6: (ports) => ipcRenderer.invoke("wireless:ipv6", ports),
     scan: (req) => ipcRenderer.invoke("wireless:scan", req),
     cancelScan: () => ipcRenderer.invoke("wireless:cancelScan"),
     onProgress: (listener) => subscribe<[ScanProgress]>("wireless:progress", listener),
@@ -87,6 +121,7 @@ const api: FarmApi = {
   system: {
     props: (serial) => ipcRenderer.invoke("system:props", serial),
     stats: (serial) => ipcRenderer.invoke("system:stats", serial),
+    ping: (serial) => ipcRenderer.invoke("system:ping", serial),
   },
   proxy: {
     state: () => ipcRenderer.invoke("proxy:state"),
@@ -115,6 +150,28 @@ const api: FarmApi = {
     stop: () => ipcRenderer.invoke("recorder:stop"),
     cancel: () => ipcRenderer.invoke("recorder:cancel"),
     onStatus: (listener) => subscribe<[RecordingStatus | null]>("recorder:status", listener),
+  },
+  downloads: {
+    enqueue: (serial, paths) => ipcRenderer.invoke("downloads:enqueue", serial, paths),
+    list: () => ipcRenderer.invoke("downloads:list"),
+    cancel: (id) => ipcRenderer.invoke("downloads:cancel", id),
+    clear: () => ipcRenderer.invoke("downloads:clear"),
+    onChange: (listener) => subscribe<[DownloadTask[]]>("downloads:changed", listener),
+  },
+  notifications: {
+    start: (serial, popup) => ipcRenderer.invoke("notifications:start", serial, popup),
+    stop: () => ipcRenderer.invoke("notifications:stop"),
+    list: () => ipcRenderer.invoke("notifications:list"),
+    clear: () => ipcRenderer.invoke("notifications:clear"),
+    serial: () => ipcRenderer.invoke("notifications:serial"),
+    onChange: (listener) => subscribe<[PhoneNotification[]]>("notifications:changed", listener),
+  },
+  screenrec: {
+    create: (serial, ext) => ipcRenderer.invoke("screenrec:create", serial, ext),
+    append: (id, bytes) => ipcRenderer.invoke("screenrec:append", id, bytes),
+    finish: (id) => ipcRenderer.invoke("screenrec:finish", id),
+    abort: (id) => ipcRenderer.invoke("screenrec:abort", id),
+    reveal: (path) => ipcRenderer.invoke("screenrec:reveal", path),
   },
   updates: {
     status: () => ipcRenderer.invoke("updates:status"),
